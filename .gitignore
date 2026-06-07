@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Arduino / build
+build/
+*.bin
+*.elf
+*.map
+
+# Logo source download / scratch
+*.png
+!docs/*.png
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
