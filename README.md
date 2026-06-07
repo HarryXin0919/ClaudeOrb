@@ -1,5 +1,7 @@
 # ClaudeOrb
 
+**English** | [简体中文](README.zh-CN.md)
+
 A tiny desk **orb that shows your Claude plan usage in real time** — on a 1.85" round
 ESP32-S3 display. Glance over and see how much of your current **5‑hour session** and
 **weekly** limits you've burned, when they reset, today's token count, and what your
