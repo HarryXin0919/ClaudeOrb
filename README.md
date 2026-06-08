@@ -107,14 +107,19 @@ Keep it running. See [Autostart](#autostart-optional) to launch it at login.
    - **USB CDC On Boot: Enabled**
    - **Partition Scheme: Huge APP (3MB No OTA)**
    - **Flash Size: 16MB**
+   - **PSRAM: OPI PSRAM** (used as a frame buffer so the screen never flickers)
 5. Upload.
 
 arduino‑cli one‑liner:
 
 ```bash
-arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=16M \
+arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=16M,PSRAM=opi \
   -u -p <PORT> firmware/claude_orb
 ```
+
+> The firmware draws to a PSRAM canvas and only repaints when a value changes
+> (flicker‑free), and shows a **battery indicator** (read from the onboard BQ27220
+> fuel gauge) in the bottom‑right when a LiPo is connected.
 
 After boot it connects to Wi‑Fi and starts polling the proxy. Numbers appear within a
 few seconds.

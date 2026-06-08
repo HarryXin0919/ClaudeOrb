@@ -4,7 +4,8 @@
    Page 2 细节: 各档限额(5H/WEEK/SONNET/OPUS/EXTRA) + 今日 token + 当前活跃会话。
    按 BOOT 键(GPIO0)翻页。数据来自 claude_limits_proxy.py。
 
-   FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=16M
+   FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=16M,PSRAM=opi
+   (PSRAM=opi 给 Arduino_Canvas 帧缓冲；右上角电量来自 BQ27220 @0x55)
    ============================================================================ */
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -17,9 +18,9 @@
 // ---------------------- 1) EDIT THESE / 改这里 ----------------------
 const char* WIFI_SSID = "YOUR_WIFI_SSID";       // 2.4GHz only (ESP32-S3 can't do 5GHz)
 const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
-const char* PROXY_URL = "http://192.168.1.50:8787/usage";  // your PC's LAN IP running the proxy
+const char* PROXY_URL = "http://192.168.1.50:8787/usage";   // your PC's LAN IP
 const uint32_t POLL_MS   = 12000;    // 拉取间隔(代理已分别缓存：限额180s/细节8s)
-const uint32_t RENDER_MS = 3000;     // 倒计时/空闲刷新
+const uint32_t RENDER_MS = 5000;     // 检查倒计时变化(只在内容变时才刷出)
 
 // ---------------------- 2) 引脚 ----------------------
 #define BL_PIN  5
@@ -27,9 +28,12 @@ const uint32_t RENDER_MS = 3000;     // 倒计时/空闲刷新
 #define RST_PIN 3
 #define BTN_PIN 0      // BOOT 键
 Arduino_DataBus* bus = new Arduino_ESP32QSPI(21, 40, 46, 45, 42, 41);
-Arduino_GFX* gfx = new Arduino_ST77916(bus, RST_PIN, 0, true, 360, 360,
-                                       0, 0, 0, 0,
-                                       st77916_ws_init_operations, sizeof(st77916_ws_init_operations));
+Arduino_GFX* output = new Arduino_ST77916(bus, RST_PIN, 0, true, 360, 360,
+                                          0, 0, 0, 0,
+                                          st77916_ws_init_operations, sizeof(st77916_ws_init_operations));
+// PSRAM 帧缓冲：先画到内存再一次性刷出，消除整屏重绘的闪烁
+Arduino_Canvas* canvas = new Arduino_Canvas(360, 360, output);
+Arduino_GFX* gfx = canvas;
 
 // ---------------------- 配色 ----------------------
 #define RGB565(r, g, b) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
@@ -109,6 +113,37 @@ void pageDots(int p) {
 // 计算实时倒计时
 long liveReset(long base) { long r = base - (long)((millis() - U.fetchMs) / 1000); return r < 0 ? 0 : r; }
 
+// ---------------------- 电量 (BQ27220 @0x55) ----------------------
+int g_bat = -1;
+int readBattery() {                              // BQ27220 电压(0x08, mV) -> %，平滑+量化防抖
+  long sum = 0; int n = 0;
+  for (int i = 0; i < 5; i++) {
+    Wire.beginTransmission(0x55); Wire.write(0x08);
+    if (Wire.endTransmission(false) != 0) { delay(3); continue; }
+    if (Wire.requestFrom(0x55, 2) != 2) { delay(3); continue; }
+    int lo = Wire.read(), hi = Wire.read();
+    int mv = (hi << 8) | lo;
+    if (mv > 2500 && mv < 4500) { sum += mv; n++; }
+    delay(3);
+  }
+  if (n == 0) return g_bat;                      // 读不到就保持上次
+  int mv = sum / n;
+  int pct = constrain((int)round((mv - 3300) * 100.0 / 900.0), 0, 100); // 3.3V=0% 4.2V=100%
+  pct = ((pct + 2) / 5) * 5;                     // 量化到 5%
+  if (g_bat >= 0 && abs(pct - g_bat) < 5) return g_bat;   // 滞回，<5% 不动
+  return pct;
+}
+void drawBattery(int x, int y, int pct) {        // 24x12 电池外框 + 左侧 %
+  if (pct < 0) return;
+  char b[6]; snprintf(b, sizeof(b), "%d%%", pct);
+  txt(b, x - 6 - txtW(b, 2), y - 2, 2, C_DIM);
+  gfx->drawRoundRect(x, y, 24, 12, 2, C_DIM);
+  gfx->fillRect(x + 24, y + 3, 3, 6, C_DIM);     // 正极头
+  int fw = (int)round(pct / 100.0 * 20);
+  uint16_t fc = pct <= 15 ? C_RED : (pct <= 30 ? C_AMBER : C_ORANGE);
+  if (fw > 0) gfx->fillRect(x + 2, y + 2, fw, 8, fc);
+}
+
 // ---------------------- 触摸滑动(CST816S @0x15) ----------------------
 #define TOUCH_ADDR 0x15
 bool touchActive = false; int swStartX = 0, swStartY = 0, swCurX = 0, swCurY = 0; uint32_t swStart = 0;
@@ -169,10 +204,9 @@ void renderPage1() {
   gauge(212, "WEEKLY",  U.weekPct,    liveReset(U.weekReset));
 
   uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
-  String s = "CLAUDE CODE";
-  int sw = txtW(s, 2) + 18, sx = CX - sw / 2;
-  gfx->fillCircle(sx + 5, 301, 5, dot);
-  txt(s, sx + 18, 295, 2, U.stale ? C_AMBER : C_DIM);
+  gfx->fillCircle(60, 301, 5, dot);
+  txt("CLAUDE CODE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
+  drawBattery(290, 289, g_bat);                 // 电量挪到右下角，避免与顶部重叠
   pageDots(page);
 }
 
@@ -188,6 +222,7 @@ void renderPage2() {
   int tx = CX - gw / 2;
   logoAt(tx, 34);
   txt("DETAILS", tx + CLAUDE_LOGO_W + 8, 46, 3, C_WHITE);
+  drawBattery(291, 66, g_bat);
 
   if (!U.ok && U.tokToday == 0) {
     txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 175, 3, C_RED);
@@ -219,7 +254,24 @@ void renderPage2() {
   pageDots(page);
 }
 
-void render() { if (page == 0) renderPage1(); else renderPage2(); }
+// 内容签名(分钟级；不含秒级 idle)——只在内容变化时才刷出，消除周期性闪屏
+String lastSig = "";
+String computeSig() {
+  String s = String(page) + (U.ok ? "1" : "0") + (U.stale ? "1" : "0") + String(g_bat);
+  s += pctStr(U.sessionPct) + pctStr(U.weekPct)
+     + fmtReset(liveReset(U.sessionReset)) + fmtReset(liveReset(U.weekReset));
+  if (page == 1)
+    s += pctStr(U.sonnetPct) + pctStr(U.opusPct) + (U.extraEnabled ? "E" : "e")
+       + humanTok(U.tokToday) + String(U.activeProj) + String(U.activeMsgs);
+  return s;
+}
+void render() {
+  String sig = computeSig();
+  if (sig == lastSig) return;                    // 没变就不重画、不刷出(不闪)
+  lastSig = sig;
+  if (page == 0) renderPage1(); else renderPage2();
+  canvas->flush();
+}
 
 // ---------------------- 拉数据 ----------------------
 bool poll() {
@@ -249,6 +301,7 @@ bool poll() {
   strlcpy(U.plan, doc["plan"] | "", sizeof(U.plan));
   strlcpy(U.activeProj, doc["active_project"] | "?", sizeof(U.activeProj));
   U.fetchMs = millis();
+  g_bat = readBattery();
   return true;
 }
 
@@ -258,6 +311,7 @@ void connectWiFi() {
   gfx->fillScreen(C_BG);
   logoAt(CX - CLAUDE_LOGO_W / 2, 132);
   txt("connecting wifi...", CX - txtW("connecting wifi...", 2) / 2, 195, 2, C_DIM);
+  canvas->flush();
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) delay(250);
 }
@@ -268,11 +322,14 @@ void setup() {
   pinMode(PWR_PIN, OUTPUT); digitalWrite(PWR_PIN, HIGH);
   pinMode(BL_PIN, OUTPUT);  digitalWrite(BL_PIN, HIGH);
   pinMode(BTN_PIN, INPUT_PULLUP);
-  Wire.begin(11, 10); Wire.setClock(400000);    // 触摸 I2C
-  gfx->begin(40000000);
+  Wire.begin(11, 10); Wire.setClock(400000);    // 触摸 + 电量 I2C
+  g_bat = readBattery();
+  bool cok = gfx->begin(40000000);
+  Serial.printf("canvas begin=%d  (0=帧缓冲分配失败,需 PSRAM=opi)\n", cok);
   gfx->fillScreen(C_BG);
   logoAt(CX - CLAUDE_LOGO_W / 2, 120);
   txt("CLAUDE", CX - txtW("CLAUDE", 3) / 2, 180, 3, C_WHITE);
+  canvas->flush();
 
   connectWiFi();
   poll();
