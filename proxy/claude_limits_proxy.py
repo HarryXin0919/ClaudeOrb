@@ -18,6 +18,7 @@ import os
 import json
 import time
 import glob
+import threading
 import datetime as dt
 import urllib.request
 import urllib.parse
@@ -32,10 +33,7 @@ LIM_TTL      = max(60, int(os.environ.get("CACHE_TTL", "180")))
 DET_TTL      = max(3,  int(os.environ.get("DET_TTL", "8")))
 CC_UA        = os.environ.get("CC_UA", "claude-code/1.0.0")
 
-# Outbound proxy for api.anthropic.com. Empty = direct (default).
-# If your network can't reach Anthropic directly (e.g. mainland China), set e.g.
-#   UPSTREAM_PROXY=http://127.0.0.1:7890   (a local Clash/HTTP proxy)
-UPSTREAM_PROXY = os.environ.get("UPSTREAM_PROXY", "").strip()
+UPSTREAM_PROXY = os.environ.get("UPSTREAM_PROXY", "http://127.0.0.1:7890").strip()
 _opener = urllib.request.build_opener(
     urllib.request.ProxyHandler({"http": UPSTREAM_PROXY, "https": UPSTREAM_PROXY})) if UPSTREAM_PROXY \
     else urllib.request.build_opener()
@@ -43,6 +41,17 @@ _opener = urllib.request.build_opener(
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _lim = {"ts": 0.0, "data": None}
 _det = {"ts": 0.0, "data": None}
+_hist = {"ts": 0.0, "data": None}
+_hist_busy = False
+HIST_TTL = max(60, int(os.environ.get("HIST_TTL", "300")))   # 30天扫描较重，缓存久一点
+
+# 天气 (Open-Meteo, 免 key)，给 RLCD-4.2 用
+WX_LAT  = float(os.environ.get("WX_LAT", "31.2304"))    # 上海
+WX_LON  = float(os.environ.get("WX_LON", "121.4737"))
+WX_CITY = os.environ.get("WX_CITY", "Shanghai")
+WX_TZ   = os.environ.get("WX_TZ", "Asia/Shanghai")
+WX_TTL  = max(300, int(os.environ.get("WX_TTL", "1800")))
+_wx = {"ts": 0.0, "data": None}
 
 
 # ---------------- 限额 (OAuth) ----------------
@@ -91,9 +100,12 @@ def fetch_limits():
         "session_pct": _pct(fh), "session_reset_s": _reset_s(fh.get("resets_at", "")),
         "week_pct": _pct(sd),    "week_reset_s": _reset_s(sd.get("resets_at", "")),
         "sonnet_pct": _pct(so),
+        "sonnet_reset_s": _reset_s((so or {}).get("resets_at", "")),
         "opus_pct": _pct(op),
+        "opus_reset_s": _reset_s((op or {}).get("resets_at", "")),
         "extra_enabled": bool(ex.get("is_enabled")),
         "extra_pct": _pct(ex),
+        "extra_reset_s": _reset_s(ex.get("resets_at", "")),
         "plan": sub,
     }
 
@@ -141,6 +153,25 @@ def _usage_in(u):
             + int(u.get("cache_creation_input_tokens", 0) or 0))
 
 
+# 每百万 token 估算单价(USD)，仅用于"今日花费"粗估展示 (input, cache_read, cache_write, output)
+_RATES = {"opus": (5.0, 0.50, 6.25, 25.0), "sonnet": (3.0, 0.30, 3.75, 15.0), "haiku": (1.0, 0.10, 1.25, 5.0)}
+
+
+def _rate_for(model):
+    m = (model or "").lower()
+    if "opus" in m:  return _RATES["opus"]
+    if "haiku" in m: return _RATES["haiku"]
+    return _RATES["sonnet"]            # 默认按 sonnet
+
+
+def _cost(model, u):
+    ri, rcr, rcw, ro = _rate_for(model)
+    return (int(u.get("input_tokens", 0) or 0) * ri
+            + int(u.get("cache_read_input_tokens", 0) or 0) * rcr
+            + int(u.get("cache_creation_input_tokens", 0) or 0) * rcw
+            + int(u.get("output_tokens", 0) or 0) * ro) / 1e6
+
+
 def _parse_active(fp, now):
     cwd = ""; tok = 0; msgs = 0; last = None; seen = set()
     try:
@@ -181,7 +212,7 @@ def scan_details():
     now = dt.datetime.now().astimezone()
     today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
     cutoff = today0.timestamp() - 3600
-    in_t = out_t = 0; seen = set()
+    in_t = out_t = 0; cost = 0.0; seen = set()
     files = glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True)
     for fp in files:
         try:
@@ -214,6 +245,7 @@ def scan_details():
                         continue
                     in_t += _usage_in(u)
                     out_t += int(u.get("output_tokens", 0) or 0)
+                    cost += _cost(msg.get("model", ""), u)
         except Exception:
             continue
     active = {"active_project": "?", "active_tok": 0, "active_msgs": 0, "active_idle_s": -1}
@@ -222,7 +254,8 @@ def scan_details():
             active = _parse_active(max(files, key=os.path.getmtime), now)
         except Exception:
             pass
-    return {"tok_today_in": in_t, "tok_today_out": out_t, "tok_today": in_t + out_t, **active}
+    return {"tok_today_in": in_t, "tok_today_out": out_t, "tok_today": in_t + out_t,
+            "cost_today_usd": round(cost, 2), **active}
 
 
 def cached_details():
@@ -238,9 +271,144 @@ def cached_details():
     return _det["data"]
 
 
+# ---------------- 7天柱图 + 周/月花费 (本地日志，扫30天) ----------------
+def scan_history():
+    now = dt.datetime.now().astimezone()
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start7  = today0 - dt.timedelta(days=6)          # 含今天共 7 天(柱图)
+    start30 = today0 - dt.timedelta(days=29)         # 含今天共 30 天(月花费)
+    cutoff = start30.timestamp() - 3600
+    buckets = {}; cost7 = 0.0; cost30 = 0.0; seen = set()
+    for fp in glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True):
+        try:
+            if os.path.getmtime(fp) < cutoff:
+                continue
+        except OSError:
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    msg = o.get("message") or {}
+                    if msg.get("role") != "assistant":
+                        continue
+                    u = msg.get("usage") or {}
+                    if not u:
+                        continue
+                    mid = msg.get("id")
+                    if mid:
+                        if mid in seen:
+                            continue
+                        seen.add(mid)
+                    d = _local(o.get("timestamp", ""))
+                    if not d or d < start30:
+                        continue
+                    c = _cost(msg.get("model", ""), u)
+                    cost30 += c
+                    if d >= start7:
+                        key = d.date().isoformat()
+                        buckets[key] = buckets.get(key, 0) + _usage_in(u) + int(u.get("output_tokens", 0) or 0)
+                        cost7 += c
+        except Exception:
+            continue
+    tok_7d = [int(buckets.get((start7 + dt.timedelta(days=i)).date().isoformat(), 0)) for i in range(7)]
+    return {"tok_7d": tok_7d, "week_tok": int(sum(tok_7d)),
+            "cost_7d_usd": round(cost7, 2), "cost_30d_usd": round(cost30, 2)}
+
+
+def _hist_compute():
+    global _hist_busy
+    try:
+        _hist["data"], _hist["ts"] = scan_history(), time.time()
+    except Exception as e:  # noqa: BLE001
+        print("[ERR history]", str(e)[:140])
+    finally:
+        _hist_busy = False
+
+
+def cached_history():
+    global _hist_busy
+    nowt = time.time()
+    if _hist["data"] is None:                         # 首次:同步跑一次(启动已预热则不会到这)
+        if not _hist_busy:
+            _hist_busy = True
+            _hist_compute()
+        return _hist["data"] or {"tok_7d": [0] * 7, "week_tok": 0, "cost_7d_usd": 0, "cost_30d_usd": 0}
+    if nowt - _hist["ts"] >= HIST_TTL and not _hist_busy:   # 过期 → 后台刷新，不阻塞 ESP
+        _hist_busy = True
+        threading.Thread(target=_hist_compute, daemon=True).start()
+    return _hist["data"]
+
+
+# ---------------- 天气 (Open-Meteo) ----------------
+def fetch_weather():
+    url = ("https://api.open-meteo.com/v1/forecast"
+           "?latitude=%s&longitude=%s"
+           "&current=temperature_2m,weather_code,relative_humidity_2m,apparent_temperature,wind_speed_10m"
+           "&hourly=temperature_2m,precipitation_probability"
+           "&daily=weather_code,temperature_2m_max,temperature_2m_min"
+           "&timezone=%s&forecast_days=5"
+           % (WX_LAT, WX_LON, urllib.parse.quote(WX_TZ)))
+    req = urllib.request.Request(url, headers={"User-Agent": "ClaudeOrb-RLCD/1.0"})
+    with _opener.open(req, timeout=20) as r:
+        j = json.loads(r.read().decode("utf-8"))
+    cur = j.get("current") or {}
+    d = j.get("daily") or {}
+    times = d.get("time", []); codes = d.get("weather_code", [])
+    his = d.get("temperature_2m_max", []); los = d.get("temperature_2m_min", [])
+    days = []
+    for i in range(min(5, len(times))):
+        try:
+            dow = dt.datetime.fromisoformat(times[i]).strftime("%a")
+        except Exception:
+            dow = ""
+        days.append({"d": dow, "c": int(codes[i]),
+                     "hi": int(round(his[i])), "lo": int(round(los[i]))})
+    # 逐时:从当前整点起取 12 小时
+    hr = j.get("hourly") or {}
+    htimes = hr.get("time", []); htemps = hr.get("temperature_2m", []); hprec = hr.get("precipitation_probability", [])
+    h0 = 0
+    try:
+        nowh = dt.datetime.now().replace(minute=0, second=0, microsecond=0)
+        for i, ts in enumerate(htimes):
+            if dt.datetime.fromisoformat(ts) >= nowh:
+                h0 = i; break
+    except Exception:
+        h0 = 0
+    hourly_12h = [{"t": int(round(htemps[i])),
+                   "p": int(hprec[i]) if i < len(hprec) and hprec[i] is not None else 0}
+                  for i in range(h0, min(h0 + 12, len(htemps)))]
+    return {"now_t": int(round(cur.get("temperature_2m", 0))),
+            "now_c": int(cur.get("weather_code", 0)),
+            "now_feels": int(round(cur.get("apparent_temperature", cur.get("temperature_2m", 0)))),
+            "now_hum": int(round(cur.get("relative_humidity_2m", 0))),
+            "now_wind": int(round(cur.get("wind_speed_10m", 0))),
+            "city": WX_CITY, "days": days, "hourly_12h": hourly_12h}
+
+
+def cached_weather():
+    nowt = time.time()
+    if _wx["data"] and nowt - _wx["ts"] < WX_TTL:
+        return _wx["data"]
+    try:
+        _wx["data"], _wx["ts"] = fetch_weather(), nowt
+    except Exception as e:  # noqa: BLE001
+        print("[ERR weather]", str(e)[:120])
+    return _wx["data"]
+
+
 def payload():
     p = dict(cached_limits())
     p.update(cached_details())
+    p.update(cached_history())
+    wx = cached_weather()
+    if wx:
+        p["weather"] = wx
     p["ts"] = int(time.time())
     return p
 
@@ -274,6 +442,8 @@ if __name__ == "__main__":
     print(f"Claude 用量代理(双页) → http://0.0.0.0:{PORT}/usage  (UA={CC_UA}, 限额{LIM_TTL}s 细节{DET_TTL}s)")
     print(f"  凭据: {CRED_FILE}")
     print(f"  日志: {PROJECTS_DIR}")
+    _hist_busy = True                                # 启动即后台预热 30 天扫描
+    threading.Thread(target=_hist_compute, daemon=True).start()
     try:
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
