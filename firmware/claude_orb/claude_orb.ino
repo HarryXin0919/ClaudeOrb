@@ -113,35 +113,57 @@ void pageDots(int p) {
 // 计算实时倒计时
 long liveReset(long base) { long r = base - (long)((millis() - U.fetchMs) / 1000); return r < 0 ? 0 : r; }
 
-// ---------------------- 电量 (BQ27220 @0x55) ----------------------
-int g_bat = -1;
-int readBattery() {                              // BQ27220 电压(0x08, mV) -> %，平滑+量化防抖
-  long sum = 0; int n = 0;
-  for (int i = 0; i < 5; i++) {
-    Wire.beginTransmission(0x55); Wire.write(0x08);
-    if (Wire.endTransmission(false) != 0) { delay(3); continue; }
-    if (Wire.requestFrom(0x55, 2) != 2) { delay(3); continue; }
-    int lo = Wire.read(), hi = Wire.read();
-    int mv = (hi << 8) | lo;
-    if (mv > 2500 && mv < 4500) { sum += mv; n++; }
-    delay(3);
+// ---------------------- 电量 / 充电 (BQ27220 @0x55) ----------------------
+int  g_bat = -1;
+bool g_charging = false;
+int  readReg16(uint8_t reg) {                    // 读 2 字节(无符号)，失败返回 -100000
+  Wire.beginTransmission(0x55); Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return -100000;
+  if (Wire.requestFrom(0x55, 2) != 2)   return -100000;
+  int lo = Wire.read(), hi = Wire.read();
+  return (hi << 8) | lo;
+}
+int readBattery() {                              // StateOfCharge(0x2C, %) —— 电量计已算好，最准
+  int v[3], n = 0;
+  for (int i = 0; i < 3; i++) { int s = readReg16(0x2C); if (s >= 0 && s <= 100) v[n++] = s; delay(3); }
+  if (n == 0) {                                  // SOC 读不到 → 退回电压(0x08)估算
+    int mv = readReg16(0x08); if (mv < 2500 || mv > 4500) return g_bat;
+    return constrain((int)round((mv - 3300) * 100.0 / 900.0), 0, 100);
   }
-  if (n == 0) return g_bat;                      // 读不到就保持上次
-  int mv = sum / n;
-  int pct = constrain((int)round((mv - 3300) * 100.0 / 900.0), 0, 100); // 3.3V=0% 4.2V=100%
-  pct = ((pct + 2) / 5) * 5;                     // 量化到 5%
-  if (g_bat >= 0 && abs(pct - g_bat) < 5) return g_bat;   // 滞回，<5% 不动
+  int pct = (n == 3) ? max(min(v[0], v[1]), min(max(v[0], v[1]), v[2]))   // 中位
+                     : (n == 2 ? (v[0] + v[1]) / 2 : v[0]);
+  if (g_bat >= 0 && abs(pct - g_bat) < 2) return g_bat;   // ±1 抖动不动
   return pct;
 }
-void drawBattery(int x, int y, int pct) {        // 24x12 电池外框 + 左侧 %
+bool readCharging() {                            // 电流符号优先；≈0 时看 DSG 位(BatteryStatus bit0)
+  int cur = readReg16(0x0C);
+  if (cur != -100000) { int16_t c = (int16_t)cur; if (c > 5) return true; if (c < -5) return false; }
+  int st = readReg16(0x0A);
+  if (st != -100000) return (st & 0x0001) == 0; // bit0=DSG，1=放电 → 0=充电/已满
+  return g_charging;
+}
+void drawBolt(Arduino_GFX* g, int x, int y, uint16_t c) {   // ~6x11 小闪电
+  g->fillTriangle(x + 4, y,     x,     y + 6, x + 3, y + 6,  c);
+  g->fillTriangle(x + 3, y + 5, x + 6, y + 5, x + 2, y + 11, c);
+}
+void drawBattery(int x, int y, int pct, bool charging) {    // %文字 + 电池框 + 充电闪电
   if (pct < 0) return;
   char b[6]; snprintf(b, sizeof(b), "%d%%", pct);
   txt(b, x - 6 - txtW(b, 2), y - 2, 2, C_DIM);
   gfx->drawRoundRect(x, y, 24, 12, 2, C_DIM);
   gfx->fillRect(x + 24, y + 3, 3, 6, C_DIM);     // 正极头
   int fw = (int)round(pct / 100.0 * 20);
-  uint16_t fc = pct <= 15 ? C_RED : (pct <= 30 ? C_AMBER : C_ORANGE);
+  uint16_t fc = charging ? C_GREEN : (pct <= 15 ? C_RED : (pct <= 30 ? C_AMBER : C_ORANGE));
   if (fw > 0) gfx->fillRect(x + 2, y + 2, fw, 8, fc);
+  if (charging) drawBolt(gfx, x + 9, y, C_WHITE);
+}
+// 充电时电池条"上涨扫描"动画：只把电池小区域直接画到 output(不触发整屏 flush)，所以不闪
+void drawChargeFrame(int x, int y, int pct, int level) {
+  output->fillRect(x, y, 28, 13, C_BG);
+  output->drawRoundRect(x, y, 24, 12, 2, C_DIM);
+  output->fillRect(x + 24, y + 3, 3, 6, C_DIM);
+  if (level > 0) output->fillRect(x + 2, y + 2, min(level, 20), 8, C_GREEN);
+  drawBolt(output, x + 9, y, C_WHITE);
 }
 
 // ---------------------- 触摸滑动(CST816S @0x15) ----------------------
@@ -206,7 +228,7 @@ void renderPage1() {
   uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
   gfx->fillCircle(60, 301, 5, dot);
   txt("CLAUDE CODE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
-  drawBattery(290, 289, g_bat);                 // 电量挪到右下角，避免与顶部重叠
+  drawBattery(290, 289, g_bat, g_charging);     // 电量挪到右下角，避免与顶部重叠
   pageDots(page);
 }
 
@@ -222,7 +244,7 @@ void renderPage2() {
   int tx = CX - gw / 2;
   logoAt(tx, 34);
   txt("DETAILS", tx + CLAUDE_LOGO_W + 8, 46, 3, C_WHITE);
-  drawBattery(291, 66, g_bat);
+  drawBattery(290, 289, g_bat, g_charging);     // 与第1页一致，挪到右下角避免压标题
 
   if (!U.ok && U.tokToday == 0) {
     txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 175, 3, C_RED);
@@ -257,7 +279,7 @@ void renderPage2() {
 // 内容签名(分钟级；不含秒级 idle)——只在内容变化时才刷出，消除周期性闪屏
 String lastSig = "";
 String computeSig() {
-  String s = String(page) + (U.ok ? "1" : "0") + (U.stale ? "1" : "0") + String(g_bat);
+  String s = String(page) + (U.ok ? "1" : "0") + (U.stale ? "1" : "0") + String(g_bat) + (g_charging ? "C" : "c");
   s += pctStr(U.sessionPct) + pctStr(U.weekPct)
      + fmtReset(liveReset(U.sessionReset)) + fmtReset(liveReset(U.weekReset));
   if (page == 1)
@@ -302,6 +324,7 @@ bool poll() {
   strlcpy(U.activeProj, doc["active_project"] | "?", sizeof(U.activeProj));
   U.fetchMs = millis();
   g_bat = readBattery();
+  g_charging = readCharging();
   return true;
 }
 
@@ -324,6 +347,7 @@ void setup() {
   pinMode(BTN_PIN, INPUT_PULLUP);
   Wire.begin(11, 10); Wire.setClock(400000);    // 触摸 + 电量 I2C
   g_bat = readBattery();
+  g_charging = readCharging();
   bool cok = gfx->begin(40000000);
   Serial.printf("canvas begin=%d  (0=帧缓冲分配失败,需 PSRAM=opi)\n", cok);
   gfx->fillScreen(C_BG);
@@ -359,5 +383,21 @@ void loop() {
     render();
     lastRender = now;
   }
+
+  // 充电状态每秒复查一次(插拔即时反映)
+  static uint32_t lastChg = 0, lastAnim = 0; static int animLevel = 0;
+  if (now - lastChg >= 1000) {
+    bool c = readCharging();
+    if (c != g_charging) { g_charging = c; render(); lastRender = now; animLevel = 0; }
+    lastChg = now;
+  }
+  // 充电时电池条上涨扫描动画(只直接画电池小区域，不整屏刷)
+  if (g_charging && g_bat >= 0 && now - lastAnim >= 90) {
+    int full = (int)round(g_bat / 100.0 * 20);
+    animLevel += 2; if (animLevel > full + 3) animLevel = 0;
+    drawChargeFrame(290, 289, g_bat, animLevel);
+    lastAnim = now;
+  }
+
   delay(20);
 }

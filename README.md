@@ -118,8 +118,10 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=hug
 ```
 
 > The firmware draws to a PSRAM canvas and only repaints when a value changes
-> (flicker‑free), and shows a **battery indicator** (read from the onboard BQ27220
-> fuel gauge) in the bottom‑right when a LiPo is connected.
+> (flicker‑free), and shows a **battery indicator** in the bottom‑right when a LiPo
+> is connected. The charge level comes from the onboard **BQ27220 fuel gauge**
+> (StateOfCharge); while charging the gauge turns green with a lightning bolt and an
+> animated fill‑sweep, painted directly to that small region so it stays flicker‑free.
 
 After boot it connects to Wi‑Fi and starts polling the proxy. Numbers appear within a
 few seconds.

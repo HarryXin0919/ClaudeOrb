@@ -100,14 +100,19 @@ python proxy/claude_limits_proxy.py
    - **USB CDC On Boot: Enabled**
    - **Partition Scheme: Huge APP (3MB No OTA)**
    - **Flash Size: 16MB**
+   - **PSRAM: OPI PSRAM**(当帧缓冲用,屏幕才不闪)
 5. 上传。
 
 arduino-cli 一行:
 
 ```bash
-arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=16M \
+arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=16M,PSRAM=opi \
   -u -p <端口> firmware/claude_orb
 ```
+
+> 固件画到 PSRAM 帧缓冲、只在数值变化时才整屏刷出(不闪);接了锂电时右下角显示**电量图标**。
+> 电量取自板载 **BQ27220 电量计**(StateOfCharge);充电时电池变绿、带闪电,并有上涨扫描动画
+> (只直接画电池那一小块,所以仍然不闪)。
 
 开机后会连 Wi-Fi 并开始轮询代理,几秒内出数字。
 
