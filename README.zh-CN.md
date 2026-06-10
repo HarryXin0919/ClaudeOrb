@@ -83,6 +83,9 @@ python proxy/claude_limits_proxy.py
 - **放行防火墙**:首次弹窗时允许 Python 接受入站连接(它监听 `8787` 端口)。
 - **直连不到 `api.anthropic.com`**(如中国大陆)?让代理走你本地的 HTTP 代理:
   `UPSTREAM_PROXY=http://127.0.0.1:7890 python proxy/claude_limits_proxy.py`(Clash 等)。
+- **安全**:代理只在局域网内服务,且**绝不返回你的 OAuth token**——只给派生的百分比数字。
+  在合租/公共等不可信网络上,设 `PROXY_TOKEN=<密码>`,固件里 `PROXY_URL` 末尾加
+  `?token=<密码>`(或发 `Authorization: Bearer <密码>` 头);没带的请求一律 401。
 
 让它一直开着。开机自启见 [自启](#自启可选)。
 

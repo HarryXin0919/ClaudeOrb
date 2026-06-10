@@ -15,6 +15,7 @@ Claude 用量代理 (订阅版, 双页) —— 给 ESP32-S3 圆屏喂数据。
 环境变量: PORT / CACHE_TTL(限额) / DET_TTL(细节) / UPSTREAM_PROXY / CC_UA / CRED_FILE / CLAUDE_PROJECTS_DIR / PROXY_TOKEN
 """
 import os
+import re
 import json
 import time
 import glob
@@ -52,6 +53,12 @@ WX_CITY = os.environ.get("WX_CITY", "Shanghai")
 WX_TZ   = os.environ.get("WX_TZ", "Asia/Shanghai")
 WX_TTL  = max(300, int(os.environ.get("WX_TTL", "1800")))
 _wx = {"ts": 0.0, "data": None}
+
+
+def _safe_err(msg):
+    """返回给客户端的错误信息脱敏:本地文件路径(含用户名)只留给控制台,不出网。"""
+    msg = re.sub(r"[A-Za-z]:\\[^\s'\"]+", "<path>", str(msg))
+    return re.sub(r"(?:/[\w.~-]+){2,}", "<path>", msg)[:140]
 
 
 # ---------------- 限额 (OAuth) ----------------
@@ -125,12 +132,13 @@ def cached_limits():
     except urllib.error.HTTPError as e:
         msg = f"HTTP {e.code}: " + e.read().decode('utf-8', 'ignore')[:120]
         print("[ERR limits]", msg)
+        msg = _safe_err(msg)
         if _lim["data"]:
             s = dict(_lim["data"]); s["stale"] = True; s["err"] = msg; return s
         return {"ok": False, "err": msg}
     except Exception as e:  # noqa: BLE001
-        msg = str(e)[:140]
-        print("[ERR limits]", msg)
+        print("[ERR limits]", str(e)[:140])
+        msg = _safe_err(e)
         if _lim["data"]:
             s = dict(_lim["data"]); s["stale"] = True; s["err"] = msg; return s
         return {"ok": False, "err": msg}
@@ -420,18 +428,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
+
+    def _authed(self, query):
+        if not SHARED_TOKEN:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer ") and auth[7:].strip() == SHARED_TOKEN:
+            return True
+        q = urllib.parse.parse_qs(query)
+        return q.get("token", [""])[0] == SHARED_TOKEN
 
     def do_GET(self):  # noqa: N802
         u = urllib.parse.urlparse(self.path)
         if u.path not in ("/usage", "/"):
             return self._send(404, {"ok": False, "err": "not found"})
-        if SHARED_TOKEN:
-            q = urllib.parse.parse_qs(u.query)
-            if q.get("token", [""])[0] != SHARED_TOKEN:
-                return self._send(401, {"ok": False, "err": "bad token"})
+        if not self._authed(u.query):
+            return self._send(401, {"ok": False, "err": "bad token"})
         self._send(200, payload())
 
     def log_message(self, *a):

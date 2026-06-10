@@ -89,6 +89,10 @@ You should see `Claude 用量代理 → http://0.0.0.0:8787/usage`. Open
   connections (it serves on port `8787`).
 - **Can't reach `api.anthropic.com` directly** (e.g. mainland China)? Route the proxy
   through your local HTTP proxy: `UPSTREAM_PROXY=http://127.0.0.1:7890 python proxy/claude_limits_proxy.py`.
+- **Security:** the proxy listens on your LAN and never returns your OAuth token —
+  only derived percentages. On a shared/untrusted network, set `PROXY_TOKEN=<secret>`
+  and append `?token=<secret>` to `PROXY_URL` in the firmware (or send
+  `Authorization: Bearer <secret>`); requests without it get 401.
 
 Keep it running. See [Autostart](#autostart-optional) to launch it at login.
 
