@@ -53,6 +53,8 @@ WX_CITY = os.environ.get("WX_CITY", "Shanghai")
 WX_TZ   = os.environ.get("WX_TZ", "Asia/Shanghai")
 WX_TTL  = max(300, int(os.environ.get("WX_TTL", "1800")))
 _wx = {"ts": 0.0, "data": None}
+_wx_busy = False
+_direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 直连(不走 UPSTREAM_PROXY)
 
 
 def _safe_err(msg):
@@ -363,8 +365,13 @@ def fetch_weather():
            "&timezone=%s&forecast_days=5"
            % (WX_LAT, WX_LON, urllib.parse.quote(WX_TZ)))
     req = urllib.request.Request(url, headers={"User-Agent": "ClaudeOrb-RLCD/1.0"})
-    with _opener.open(req, timeout=20) as r:
-        j = json.loads(r.read().decode("utf-8"))
+    try:
+        with _opener.open(req, timeout=15) as r:
+            j = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        # UPSTREAM_PROXY 的节点连不上 open-meteo 时直连兜底(国内可直连)
+        with _direct.open(req, timeout=15) as r:
+            j = json.loads(r.read().decode("utf-8"))
     cur = j.get("current") or {}
     d = j.get("daily") or {}
     times = d.get("time", []); codes = d.get("weather_code", [])
@@ -399,14 +406,23 @@ def fetch_weather():
             "city": WX_CITY, "days": days, "hourly_12h": hourly_12h}
 
 
-def cached_weather():
-    nowt = time.time()
-    if _wx["data"] and nowt - _wx["ts"] < WX_TTL:
-        return _wx["data"]
+def _wx_compute():
+    global _wx_busy
     try:
-        _wx["data"], _wx["ts"] = fetch_weather(), nowt
+        _wx["data"], _wx["ts"] = fetch_weather(), time.time()
     except Exception as e:  # noqa: BLE001
         print("[ERR weather]", str(e)[:120])
+        _wx["ts"] = time.time() - WX_TTL + 120   # 失败退避:2 分钟后再试
+    finally:
+        _wx_busy = False
+
+
+def cached_weather():
+    """天气只在后台线程刷新,请求路径绝不阻塞(上游挂死曾拖到 20s+,ESP32 直接超时 NO DATA)。"""
+    global _wx_busy
+    if time.time() - _wx["ts"] >= WX_TTL and not _wx_busy:
+        _wx_busy = True
+        threading.Thread(target=_wx_compute, daemon=True).start()
     return _wx["data"]
 
 
@@ -458,6 +474,8 @@ if __name__ == "__main__":
     print(f"  日志: {PROJECTS_DIR}")
     _hist_busy = True                                # 启动即后台预热 30 天扫描
     threading.Thread(target=_hist_compute, daemon=True).start()
+    _wx_busy = True                                  # 天气也预热,且永不阻塞请求
+    threading.Thread(target=_wx_compute, daemon=True).start()
     try:
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
