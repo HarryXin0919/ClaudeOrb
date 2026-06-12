@@ -14,15 +14,15 @@ no organization account, nothing pasted anywhere.
 > Works with a **Claude Pro / Max** subscription used through Claude Code.
 
 ```
-   ┌─ Page 1 ─ overview ─┐        ┌─ Page 2 ─ details ──┐
-   |     ✻ CLAUDE        |        |    ✻ DETAILS        |
-   |        MAX          |        | 5H     2%    4h     |
-   | SESSION       29%   |  swipe | WEEK   13%   5d     |
-   | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  <-->  | SONNET 0%  OPUS --  |
-   | WEEKLY        12%   |  /BOOT | EXTRA  on           |
-   | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |        | TODAY     145M tok  |
-   |   ● CLAUDE CODE     |        | ACTIVE   my-project |
-   └─────────────────────┘        └─────────────────────┘
+   ┌─ Home ─ watch face ─┐        ┌─ Page 1 ─ overview ─┐        ┌─ Page 2 ─ details ──┐
+   |  · · usage ring · · |        |     ✻ CLAUDE        |        |    ✻ DETAILS        |
+   |        ✻            |  tap   |        MAX          |        | 5H     2%    4h     |
+   |                     |  --->  | SESSION       29%   |  swipe | WEEK   13%   5d     |
+   |      21:36          |        | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  <-->  | SONNET 0%  OPUS --  |
+   |    THU JUN 12       |  BOOT  | WEEKLY        12%   |        | EXTRA  on           |
+   |       26°           |  <---  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |        | TODAY     145M tok  |
+   |              [▮▮▮]  |        |   ● CLAUDE CODE     |        | ACTIVE   my-project |
+   └─────────────────────┘        └─────────────────────┘        └─────────────────────┘
 ```
 
 ---
@@ -146,11 +146,15 @@ So the proxy comes back after a reboot:
 
 ## Usage
 
+- **Home — watch face:** big digital clock, date, current temperature (via the proxy's
+  Open‑Meteo data), battery, and a bezel ring of 60 tick dots that doubles as the
+  SESSION usage gauge. NTP time (`TZ_OFFSET_S` / `NTP_1` / `NTP_2` at the top of the `.ino`).
 - **Page 1 — overview:** SESSION (5‑hour window) and WEEKLY (all models) as big gauges
   with live reset countdowns.
 - **Page 2 — details:** every limit tier (5H / WEEK / SONNET / OPUS / EXTRA), today's
   token total, and your currently‑active Claude Code session (project · tokens · idle).
-- **Switch pages:** **swipe** the screen (any direction) or press the **BOOT** button.
+- **Controls:** on home, **tap** to open the Claude dashboard; inside it, **swipe**
+  (any direction) to flip pages; press **BOOT** to jump between home and dashboard.
 
 ---
 

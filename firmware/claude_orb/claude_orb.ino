@@ -11,6 +11,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
+#include <time.h>
 #include <Arduino_GFX_Library.h>
 #include "st77916_ws_init.h"
 #include "claude_logo.h"
@@ -25,8 +26,11 @@
 #define NET_DEF_PROXY_PORT 8787
 #define NET_AP_NAME        "ClaudeOrb-Setup"    // setup hotspot name
 #include "net_portal.h"
-const uint32_t POLL_MS   = 12000;    // 拉取间隔(代理已分别缓存：限额180s/细节8s)
-const uint32_t RENDER_MS = 5000;     // 检查倒计时变化(只在内容变时才刷出)
+const uint32_t POLL_MS   = 12000;    // poll interval (proxy caches: limits 180s / details 8s)
+const uint32_t RENDER_MS = 1000;     // content-signature check (only flushes on change; home clock needs minute accuracy)
+const long TZ_OFFSET_S   = 8 * 3600; // your UTC offset in seconds (e.g. UTC+8)
+const char* NTP_1 = "pool.ntp.org";
+const char* NTP_2 = "ntp.aliyun.com";
 
 // ---------------------- 2) 引脚 ----------------------
 #define BL_PIN  5
@@ -63,9 +67,11 @@ struct Usage {
   int64_t tokToday = 0, activeTok = 0;
   int   activeMsgs = 0;
   char  plan[16] = "", activeProj[24] = "";
+  int   wxT = 0, wxC = -1;           // current temp / weather code (home watch face)
   uint32_t fetchMs = 0;
 } U;
 uint32_t lastPoll = 0, lastRender = 0;
+int app = 0;                          // 0 = home watch face, 1 = Claude dashboard (tap to enter, BOOT toggles)
 int page = 0;
 int lastBtn = HIGH; uint32_t btnDownMs = 0;
 uint32_t lastOnline = 0; int pollFails = 0;
@@ -187,22 +193,24 @@ bool readTouchRaw(uint8_t& fingers, int& x, int& y) {
   y = ((yh & 0x0F) << 8) | yl;
   return true;
 }
-// 滑动完成返回 true（任意方向，位移>50；规避触摸坐标轴可能的旋转/镜像）
-bool checkSwipe() {
+// Gesture: 0 = none, 1 = tap, 2 = swipe (any direction, >50px; touch axes may be rotated/mirrored)
+int checkGesture() {
   uint8_t fn = 0; int x = 0, y = 0;
-  if (!readTouchRaw(fn, x, y)) fn = 0;             // 休眠/NACK 当作无触摸
+  if (!readTouchRaw(fn, x, y)) fn = 0;             // asleep/NACK = no touch
   uint32_t now = millis();
   if (fn > 0) {
     if (!touchActive) { touchActive = true; swStartX = x; swStartY = y; swStart = now; }
     swCurX = x; swCurY = y;
-    return false;
+    return 0;
   }
   if (touchActive) {
     touchActive = false;
     int dx = swCurX - swStartX, dy = swCurY - swStartY;
-    if (now - swStart < 900 && max(abs(dx), abs(dy)) > 50) return true;
+    int d = max(abs(dx), abs(dy));
+    if (now - swStart < 900 && d > 50) return 2;
+    if (now - swStart < 400 && d < 20) return 1;
   }
-  return false;
+  return 0;
 }
 
 // ---------------------- Page 1：概览 ----------------------
@@ -283,9 +291,45 @@ void renderPage2() {
   pageDots(page);
 }
 
+// ---------------------- Home watch face (Claude dashboard is an "app" you tap into) ----------------------
+const char* WD3[7]  = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
+const char* MO3[12] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
+void renderHome() {
+  gfx->fillScreen(C_BG);
+  // 60 bezel tick dots double as the SESSION usage ring (clockwise from 12 o'clock)
+  int lit = U.ok ? (int)round(constrain(U.sessionPct, 0.0f, 100.0f) * 0.6f) : 0;
+  for (int i = 0; i < 60; i++) {
+    float a = (i * 6 - 90) * DEG_TO_RAD;
+    int x = CX + (int)round(170 * cos(a)), y = CY + (int)round(170 * sin(a));
+    gfx->fillCircle(x, y, 2, i < lit ? pctColor(U.sessionPct) : C_BAROFF);
+  }
+  logoAt(CX - CLAUDE_LOGO_W / 2, 46);            // tap anywhere to open the Claude dashboard
+
+  struct tm t; bool ok = getLocalTime(&t, 50);   // SNTP syncs in background; shows once valid
+  char hm[6] = "--:--";
+  if (ok) snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
+  txt(hm, CX - txtW(hm, 9) / 2, 128, 9, C_WHITE);
+  if (ok) {
+    char ds[16]; snprintf(ds, sizeof(ds), "%s %s %d", WD3[t.tm_wday], MO3[t.tm_mon], t.tm_mday);
+    txt(ds, CX - txtW(ds, 2) / 2, 218, 2, C_ORANGE);
+  }
+  if (U.wxC >= 0) {                              // current temp (proxy's Open-Meteo data)
+    char ts[8]; snprintf(ts, sizeof(ts), "%d", U.wxT);
+    int w = txtW(ts, 2);
+    txt(ts, CX - (w + 8) / 2, 248, 2, C_DIM);
+    gfx->drawCircle(CX - (w + 8) / 2 + w + 4, 250, 2, C_DIM);
+  }
+  drawBattery(290, 289, g_bat, g_charging);
+}
+
 // 内容签名(分钟级；不含秒级 idle)——只在内容变化时才刷出，消除周期性闪屏
 String lastSig = "";
 String computeSig() {
+  if (app == 0) {                                // home: minute + battery + usage + temp
+    struct tm t; bool ok = getLocalTime(&t, 20);
+    return "H" + String(ok ? t.tm_hour * 60 + t.tm_min : -1) + String(g_bat) + (g_charging ? "C" : "c")
+         + (U.ok ? pctStr(U.sessionPct) : "-") + String(U.wxC >= 0 ? U.wxT : -99);
+  }
   String s = String(page) + (U.ok ? "1" : "0") + (U.stale ? "1" : "0") + String(g_bat) + (g_charging ? "C" : "c");
   s += pctStr(U.sessionPct) + pctStr(U.weekPct)
      + fmtReset(liveReset(U.sessionReset)) + fmtReset(liveReset(U.weekReset));
@@ -298,7 +342,9 @@ void render() {
   String sig = computeSig();
   if (sig == lastSig) return;                    // 没变就不重画、不刷出(不闪)
   lastSig = sig;
-  if (page == 0) renderPage1(); else renderPage2();
+  if (app == 0)      renderHome();
+  else if (page == 0) renderPage1();
+  else                renderPage2();
   canvas->flush();
 }
 
@@ -329,6 +375,8 @@ bool poll() {
   U.activeIdle   = doc["active_idle_s"] | -1L;
   strlcpy(U.plan, doc["plan"] | "", sizeof(U.plan));
   strlcpy(U.activeProj, doc["active_project"] | "?", sizeof(U.activeProj));
+  JsonObject wx = doc["weather"];
+  if (!wx.isNull()) { U.wxT = wx["now_t"] | 0; U.wxC = wx["now_c"] | -1; }
   U.fetchMs = millis();
   g_bat = readBattery();
   g_charging = readCharging();
@@ -376,6 +424,8 @@ void setup() {
 
   netBegin();
   connectWiFi();
+  configTime(TZ_OFFSET_S, 0, NTP_1, NTP_2);
+  struct tm t; getLocalTime(&t, 6000);           // wait for first SNTP sync (best effort)
   poll();
   render();
   lastPoll = lastRender = millis();
@@ -384,7 +434,7 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  // BOOT key: short press = next page, hold 3s = setup portal
+  // BOOT key: short press = toggle home/Claude, hold 3s = setup portal
   int b = digitalRead(BTN_PIN);
   if (lastBtn == HIGH && b == LOW) btnDownMs = now;
   if (b == LOW && btnDownMs && now - btnDownMs >= 3000) {
@@ -393,14 +443,17 @@ void loop() {
   }
   if (lastBtn == LOW && b == HIGH) {
     if (btnDownMs && now - btnDownMs >= 30 && now - btnDownMs < 1000) {
-      page = (page + 1) % 2; render(); lastRender = now;
+      if (app == 0) { app = 1; page = 0; } else app = 0;
+      render(); lastRender = now;
     }
     btnDownMs = 0;
   }
   lastBtn = b;
 
-  // 触摸滑动翻页
-  if (checkSwipe()) { page = (page + 1) % 2; render(); lastRender = now; }
+  // Touch: on home, tap/swipe opens Claude; in Claude, swipe flips pages (BOOT goes home)
+  int gst = checkGesture();
+  if (app == 0 && gst)            { app = 1; page = 0; render(); lastRender = now; }
+  else if (app == 1 && gst == 2)  { page = (page + 1) % 2; render(); lastRender = now; }
 
   if (now - lastPoll >= POLL_MS) {
     if (WiFi.status() != WL_CONNECTED) {

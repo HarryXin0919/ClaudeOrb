@@ -13,15 +13,15 @@ ESP32-S3 屏上。一眼就能看到当前 **5 小时会话**和**每周**限额
 > 适用于通过 Claude Code 使用的 **Claude Pro / Max** 订阅。
 
 ```
-   ┌─ 第1页 · 概览 ──────┐        ┌─ 第2页 · 细节 ──────┐
-   |     ✻ CLAUDE        |        |    ✻ DETAILS        |
-   |        MAX          |        | 5H     2%    4h     |
-   | SESSION       29%   |  滑屏  | WEEK   13%   5d     |
-   | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   | <-->   | SONNET 0%  OPUS --  |
-   | WEEKLY        12%   | /BOOT  | EXTRA  on           |
-   | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |        | TODAY     145M tok  |
-   |   ● CLAUDE CODE     |        | ACTIVE   my-project |
-   └─────────────────────┘        └─────────────────────┘
+   ┌─ 主页 · 表盘 ───────┐        ┌─ 第1页 · 概览 ──────┐        ┌─ 第2页 · 细节 ──────┐
+   |  · · 用量进度环 · · |        |     ✻ CLAUDE        |        |    ✻ DETAILS        |
+   |        ✻            |  点屏  |        MAX          |        | 5H     2%    4h     |
+   |                     |  --->  | SESSION       29%   |  滑屏  | WEEK   13%   5d     |
+   |      21:36          |        | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  <-->  | SONNET 0%  OPUS --  |
+   |    THU JUN 12       |  BOOT  | WEEKLY        12%   |        | EXTRA  on           |
+   |       26°           |  <---  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |        | TODAY     145M tok  |
+   |              [▮▮▮]  |        |   ● CLAUDE CODE     |        | ACTIVE   my-project |
+   └─────────────────────┘        └─────────────────────┘        └─────────────────────┘
 ```
 
 ---
@@ -133,10 +133,14 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=hug
 
 ## 使用
 
+- **主页 · 表盘:** 大数字时钟、日期、当前气温(代理的 Open-Meteo 数据)、电量,
+  表圈 60 个刻度点兼作 SESSION 用量进度环。时间走 NTP(`.ino` 顶部的
+  `TZ_OFFSET_S` / `NTP_1` / `NTP_2` 可改)。
 - **第 1 页 · 概览:** SESSION(5 小时窗口)和 WEEKLY(全模型)两块大表 + 实时重置倒计时。
 - **第 2 页 · 细节:** 各档限额(5H / WEEK / SONNET / OPUS / EXTRA)、今日 token 总数、
   以及当前活跃的 Claude Code 会话(项目 · token · 空闲时长)。
-- **翻页:** **滑动屏幕**(任意方向)或按 **BOOT** 键。
+- **操作:** 主页**点一下**进 Claude 仪表盘;仪表盘里**滑动**(任意方向)翻页;
+  按 **BOOT** 键在主页和仪表盘之间跳转。
 
 ---
 
