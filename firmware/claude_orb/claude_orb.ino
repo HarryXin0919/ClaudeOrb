@@ -168,24 +168,38 @@ void drawBolt(Arduino_GFX* g, int x, int y, uint16_t c) {   // ~6x11 小闪电
   g->fillTriangle(x + 4, y,     x,     y + 6, x + 3, y + 6,  c);
   g->fillTriangle(x + 3, y + 5, x + 6, y + 5, x + 2, y + 11, c);
 }
-void drawBattery(int x, int y, int pct, bool charging) {    // %文字 + 电池框 + 充电闪电
-  if (pct < 0) return;
-  char b[6]; snprintf(b, sizeof(b), "%d%%", pct);
-  txt(b, x - 6 - txtW(b, 2), y - 2, 2, C_DIM);
-  gfx->drawRoundRect(x, y, 24, 12, 2, C_DIM);
-  gfx->fillRect(x + 24, y + 3, 3, 6, C_DIM);     // 正极头
-  int fw = (int)round(pct / 100.0 * 20);
-  uint16_t fc = charging ? C_GREEN : (pct <= 15 ? C_RED : (pct <= 30 ? C_AMBER : C_ORANGE));
-  if (fw > 0) gfx->fillRect(x + 2, y + 2, fw, 8, fc);
-  if (charging) drawBolt(gfx, x + 9, y, C_WHITE);
+// Compact battery pill: rounded frame + fill level + % inside; charging = green fill + bolt.
+// One component for every screen, placed on round-display anchor points:
+// home/Clock on the vertical axis, Claude pages in the bottom bar
+void drawBatteryPill(int cx, int cy) {
+  if (g_bat < 0) return;
+  const int w = 34, h = 15;
+  int x = cx - w / 2, y = cy - h / 2;
+  uint16_t fc = g_charging ? C_GREEN : (g_bat <= 15 ? C_RED : (g_bat <= 30 ? C_AMBER : C_ORANGE));
+  gfx->drawRoundRect(x, y, w, h, 4, C_DIM);
+  gfx->fillRect(x + w, cy - 3, 2, 6, C_DIM);     // positive terminal
+  int fw = g_bat * (w - 4) / 100;
+  if (fw > 0) gfx->fillRect(x + 2, y + 2, fw, h - 4, fc);
+  char b[6]; snprintf(b, sizeof(b), "%d", g_bat);
+  txt(b, cx - (int)strlen(b) * 3, y + 4, 1, C_WHITE);
+  if (g_charging) drawBolt(gfx, x - 10, y + 2, C_GREEN);
 }
-// 充电时电池条"上涨扫描"动画：只把电池小区域直接画到 output(不触发整屏 flush)，所以不闪
-void drawChargeFrame(int x, int y, int pct, int level) {
-  output->fillRect(x, y, 28, 13, C_BG);
-  output->drawRoundRect(x, y, 24, 12, 2, C_DIM);
-  output->fillRect(x + 24, y + 3, 3, 6, C_DIM);
-  if (level > 0) output->fillRect(x + 2, y + 2, min(level, 20), 8, C_GREEN);
-  drawBolt(output, x + 9, y, C_WHITE);
+// Pill anchor per app (false = this app has no pill, charging animation skips)
+bool pillPos(int& px, int& py) {
+  if (app == 0) { px = 180; py = 44;  return true; }   // home: under the time
+  if (app == 1) { px = 272; py = 298; return true; }   // Claude: bottom bar right
+  if (app == 2) { px = 180; py = 292; return true; }   // Clock: bottom of the axis
+  return false;
+}
+// Charging animation frame: redraw only the pill interior straight to output (no full flush)
+void drawChargePill(int cx, int cy, int pct, int level) {
+  const int w = 34, h = 15;
+  int x = cx - w / 2, y = cy - h / 2;
+  output->fillRect(x + 2, y + 2, w - 4, h - 4, C_BG);
+  if (level > 0) output->fillRect(x + 2, y + 2, min(level, w - 4), h - 4, C_GREEN);
+  char b[6]; snprintf(b, sizeof(b), "%d", pct);
+  output->setFont((const GFXfont*)nullptr); output->setTextSize(1); output->setTextColor(C_WHITE);
+  output->setCursor(cx - (int)strlen(b) * 3, y + 4); output->print(b);
 }
 
 // ---------------------- 触摸滑动(CST816S @0x15) ----------------------
@@ -253,7 +267,7 @@ void renderPage1() {
   uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
   gfx->fillCircle(60, 301, 5, dot);
   txt("CLAUDE CODE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
-  drawBattery(290, 289, g_bat, g_charging);     // 电量挪到右下角，避免与顶部重叠
+  drawBatteryPill(272, 298);                    // bottom bar: status left, battery right
   pageDots(page);
 }
 
@@ -269,7 +283,6 @@ void renderPage2() {
   int tx = CX - gw / 2;
   logoAt(tx, 34);
   txt("DETAILS", tx + CLAUDE_LOGO_W + 8, 46, 3, C_WHITE);
-  drawBattery(290, 289, g_bat, g_charging);     // 与第1页一致，挪到右下角避免压标题
 
   if (!U.ok && U.tokToday == 0) {
     txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 175, 3, C_RED);
@@ -296,8 +309,9 @@ void renderPage2() {
   txt(d, CX - txtW(d, 1) / 2, 274, 1, C_DIM);
 
   uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
-  gfx->fillCircle(CX - txtW("LIVE", 1) / 2 - 8, 297, 4, dot);
-  txt("LIVE", CX - txtW("LIVE", 1) / 2, 294, 1, C_DIM);
+  gfx->fillCircle(60, 301, 5, dot);
+  txt("LIVE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
+  drawBatteryPill(272, 298);                    // bottom bar aligned with page 1
   pageDots(page);
 }
 
@@ -361,9 +375,9 @@ void drawTile(int cx, int cy) {                  // iOS 风圆角图标底
 void renderHome() {
   gfx->fillScreen(C_BG);
   struct tm t;
-  if (getLocalTime(&t, 50)) {                    // 状态栏一行:时间居左 电量居右
+  if (getLocalTime(&t, 50)) {                    // axis status bar: time centered, pill below
     char hm[6]; snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
-    txt(hm, 104, 16, 2, C_WHITE);
+    txt(hm, CX - txtW(hm, 2) / 2, 12, 2, C_WHITE);
   }
   for (int i = 0; i < 4; i++) {
     drawTile(ICONS[i].cx, ICONS[i].cy);
@@ -393,7 +407,7 @@ void renderHome() {
     }
     gfx->fillCircle(cx, cy, 14, C_DIM);
     gfx->fillCircle(cx, cy, 6, C_BG); }
-  drawBattery(228, 18, g_bat, g_charging);       // 与时间同行,靠右
+  drawBatteryPill(180, 44);
 }
 
 // ---------------------- Clock App:大数字时钟表盘 ----------------------
@@ -485,7 +499,7 @@ void renderClock() {
     txt(ts, CX - (w + 8) / 2, 248, 2, C_DIM);
     gfx->drawCircle(CX - (w + 8) / 2 + w + 4, 250, 2, C_DIM);
   }
-  drawBattery(290, 289, g_bat, g_charging);
+  drawBatteryPill(180, 292);                     // bottom of the vertical axis
 }
 
 // ---------------------- Weather App:当前 + 5天预报 ----------------------
@@ -726,11 +740,14 @@ void loop() {
     if (c != g_charging) { g_charging = c; render(); lastRender = now; animLevel = 0; }
     lastChg = now;
   }
-  // 充电时电池条上涨扫描动画(只直接画电池小区域，不整屏刷;主屏电量在状态栏)
+  // Charging: rising green fill inside the pill (drawn straight to output, no full flush)
   if (g_charging && g_bat >= 0 && now - lastAnim >= 90) {
-    int full = (int)round(g_bat / 100.0 * 20);
-    animLevel += 2; if (animLevel > full + 3) animLevel = 0;
-    drawChargeFrame(app == 0 ? 228 : 290, app == 0 ? 18 : 289, g_bat, animLevel);
+    int px, py;
+    if (pillPos(px, py)) {
+      int full = g_bat * 30 / 100;
+      animLevel += 2; if (animLevel > full + 3) animLevel = 0;
+      drawChargePill(px, py, g_bat, animLevel);
+    }
     lastAnim = now;
   }
 
