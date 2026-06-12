@@ -245,7 +245,7 @@ int checkGesture() {
     int dx = swCurX - swStartX, dy = swCurY - swStartY;
     int d = max(abs(dx), abs(dy));
     if (now - swStart < 900 && d > 50) return 2;
-    if (now - swStart < 400 && d < 20) { tapX = swStartX; tapY = swStartY; return 1; }
+    if (now - swStart < 500 && d < 28) { tapX = swStartX; tapY = swStartY; return 1; }
   }
   return 0;
 }
@@ -472,23 +472,40 @@ void drawRingEx(float fillDeg, uint16_t cEnd, int sec, bool allowFill) {
   const float R = 168, W = 5, F = 1.5f;
   fillDeg = constrain(fillDeg, 0.0f, 360.0f);
   uint16_t cStart = lerp565(C_BG, cEnd, 0.45f);
-  uint16_t cTrack = lerp565(C_BG, cEnd, 0.16f);  // Apple 风:底环 = 弧色低不透明度
+  uint16_t cTrack = lerp565(C_BG, cEnd, 0.16f);  // Apple-style: track = arc color at low opacity
   bool hasFill = allowFill && fillDeg > 0.5f;
-  for (int y = (int)(CY - R - W - F) - 1; y <= (int)(CY + R + W + F) + 1; y++) {
-    float dy = y - CY;
-    float lim2 = (R + W + F) * (R + W + F) - dy * dy; if (lim2 <= 0) continue;
-    float xo = sqrtf(lim2);
-    for (int x = (int)(CX - xo) - 1; x <= (int)(CX + xo) + 1; x++) {
-      float dx = x - CX;
-      float band = W + F - fabsf(hypotf(dx, dy) - R); if (band <= 0) continue;
-      float a = band >= F ? 1 : band / F;
-      uint16_t col = cTrack;
-      if (hasFill) {
-        float deg = atan2f(dx, -dy) * RAD_TO_DEG; if (deg < 0) deg += 360;
-        if (deg <= fillDeg) col = lerp565(cStart, cEnd, deg / (fillDeg < 180 ? 180 : fillDeg));
-      }
-      fbBlend(fb, x, y, col, a);
+  // Perf-critical: iterate only the two x-spans of the annulus per row, with a squared-distance
+  // pre-filter (a naive full-screen pass costs 100ms+ per frame and starves touch sampling)
+  const float ro = R + W + F, ri = R - W - F;
+  const float ro2 = ro * ro, ri2 = ri * ri;
+  for (int y = (int)(CY - ro) - 1; y <= (int)(CY + ro) + 1; y++) {
+    float dy = y - CY, dy2 = dy * dy;
+    float o2 = ro2 - dy2; if (o2 <= 0) continue;
+    float xo = sqrtf(o2);
+    float i2 = ri2 - dy2;
+    float xi = i2 > 0 ? sqrtf(i2) : 0;
+    int sx[2], ex[2], nseg;
+    if (xi >= 3) {                               // row crosses the hole -> left + right spans
+      nseg = 2;
+      sx[0] = (int)(CX - xo) - 1; ex[0] = (int)(CX - xi) + 1;
+      sx[1] = (int)(CX + xi) - 1; ex[1] = (int)(CX + xo) + 1;
+    } else {
+      nseg = 1;
+      sx[0] = (int)(CX - xo) - 1; ex[0] = (int)(CX + xo) + 1;
     }
+    for (int s = 0; s < nseg; s++)
+      for (int x = sx[s]; x <= ex[s]; x++) {
+        float dx = x - CX, r2 = dx * dx + dy2;
+        if (r2 > ro2 || r2 < ri2) continue;      // reject in squared space, no sqrt
+        float band = W + F - fabsf(sqrtf(r2) - R); if (band <= 0) continue;
+        float a = band >= F ? 1 : band / F;
+        uint16_t col = cTrack;
+        if (hasFill) {
+          float deg = atan2f(dx, -dy) * RAD_TO_DEG; if (deg < 0) deg += 360;
+          if (deg <= fillDeg) col = lerp565(cStart, cEnd, deg / (fillDeg < 180 ? 180 : fillDeg));
+        }
+        fbBlend(fb, x, y, col, a);
+      }
   }
   if (hasFill) {                                 // 头部:先压一圈暗晕(投影)再画光帽 → 立体
     float hx = CX + R * sinf(fillDeg * DEG_TO_RAD), hy = CY - R * cosf(fillDeg * DEG_TO_RAD);
