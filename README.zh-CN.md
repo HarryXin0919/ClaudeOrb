@@ -79,13 +79,14 @@ python proxy/claude_limits_proxy.py
 应当看到 `Claude 用量代理 → http://0.0.0.0:8787/usage`。浏览器打开
 `http://localhost:8787/usage`,应能拿到含 `session_pct`、`week_pct`、`tok_today` 等的 JSON。
 
-- **查本机局域网 IP**(`ipconfig` / `ip addr`)——填固件时要用。
-- **放行防火墙**:首次弹窗时允许 Python 接受入站连接(它监听 `8787` 端口)。
+- 不用查电脑 IP——屏会用 **UDP 广播自动发现代理**(8788 端口),电脑 IP 变了也能跟上。
+- **放行防火墙**:首次弹窗时允许 Python 接受入站连接(TCP `8787` + UDP `8788`)。
 - **直连不到 `api.anthropic.com`**(如中国大陆)?让代理走你本地的 HTTP 代理:
   `UPSTREAM_PROXY=http://127.0.0.1:7890 python proxy/claude_limits_proxy.py`(Clash 等)。
 - **安全**:代理只在局域网内服务,且**绝不返回你的 OAuth token**——只给派生的百分比数字。
-  在合租/公共等不可信网络上,设 `PROXY_TOKEN=<密码>`,固件里 `PROXY_URL` 末尾加
-  `?token=<密码>`(或发 `Authorization: Bearer <密码>` 头);没带的请求一律 401。
+  在合租/公共等不可信网络上,设 `PROXY_TOKEN=<密码>`,固件里加
+  `#define NET_PROXY_QUERY "?token=<密码>"`(或发 `Authorization: Bearer <密码>` 头);
+  没带的请求一律 401。
 
 让它一直开着。开机自启见 [自启](#自启可选)。
 
@@ -95,9 +96,10 @@ python proxy/claude_limits_proxy.py
 
 1. 装库(库管理器):**GFX Library for Arduino**(作者 *moononournation*)和 **ArduinoJson**。
 2. 打开 `firmware/claude_orb/claude_orb.ino`。
-3. 改文件顶部:
-   - `WIFI_SSID` / `WIFI_PASS`——你的 **2.4GHz** 网络(ESP32-S3 不支持 5GHz)。
-   - `PROXY_URL`——`http://<你电脑的局域网IP>:8787/usage`。
+3. 可以改顶部的 `NET_DEF_*` 出厂默认值(只支持 2.4GHz),也可以**直接烧**:
+   连不上 WiFi 时屏会自动开**配网热点**(`ClaudeOrb-Setup`),手机连上后自动弹出
+   配置页(或手动开 `http://192.168.4.1`),选好 WiFi 保存即可。代理地址自动发现,
+   不用填 IP。之后想换网络,**长按 BOOT 3 秒**随时重新配网。
 4. 开发板设置:
    - 开发板:**ESP32S3 Dev Module**
    - **USB CDC On Boot: Enabled**
@@ -161,7 +163,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=hug
 | 现象 | 解决 |
 |---|---|
 | 屏黑 | 板子变体的 `RST_PIN` / 引脚不对——见上。 |
-| 屏上 `NO DATA` | 代理不可达。用手机打开 `http://<电脑IP>:8787/usage`,打不开就是**防火墙**或 `PROXY_URL` 填错。 |
+| 屏上 `NO DATA` | 代理不可达。用手机打开 `http://<电脑IP>:8787/usage`,打不开就是**防火墙**(给 Python 放行 TCP 8787 + UDP 8788)。屏每连续拉空 3 次会自动广播重找代理。 |
 | 代理返回 `ok:false` / 401 | Claude 登录态/token 过期了——开一下 Claude Code(会自动刷新),或重新 `/login`。 |
 | 代理连不上 Anthropic | 设 `UPSTREAM_PROXY`(见第 1 步)。 |
 | Wi-Fi 连不上 | 必须是 **2.4GHz**。 |

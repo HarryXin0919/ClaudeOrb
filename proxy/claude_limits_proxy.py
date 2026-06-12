@@ -29,6 +29,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 CRED_FILE    = os.environ.get("CRED_FILE", os.path.expanduser("~/.claude/.credentials.json"))
 PROJECTS_DIR = os.environ.get("CLAUDE_PROJECTS_DIR", os.path.expanduser("~/.claude/projects"))
 PORT         = int(os.environ.get("PORT", "8787"))
+DISC_PORT    = int(os.environ.get("DISC_PORT", "8788"))   # UDP 自动发现端口(0=关闭)
 SHARED_TOKEN = os.environ.get("PROXY_TOKEN", "").strip()
 LIM_TTL      = max(60, int(os.environ.get("CACHE_TTL", "180")))
 DET_TTL      = max(3,  int(os.environ.get("DET_TTL", "8")))
@@ -468,10 +469,31 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+# ---------------- UDP 自动发现 ----------------
+# 屏在局域网广播 CLAUDE_DASH_DISCOVER_V1 → 这里应答 CLAUDE_DASH_PROXY_V1 <HTTP端口>,
+# 屏取应答包的源 IP 当 proxy 地址。电脑 IP 变了/换了网络都不用重烧固件。
+def _discovery_loop():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", DISC_PORT))
+    resp = f"CLAUDE_DASH_PROXY_V1 {PORT}".encode("ascii")
+    while True:
+        try:
+            data, addr = s.recvfrom(64)
+            if data.strip() == b"CLAUDE_DASH_DISCOVER_V1":
+                s.sendto(resp, addr)
+        except Exception:
+            time.sleep(0.5)
+
+
 if __name__ == "__main__":
     print(f"Claude 用量代理(双页) → http://0.0.0.0:{PORT}/usage  (UA={CC_UA}, 限额{LIM_TTL}s 细节{DET_TTL}s)")
     print(f"  凭据: {CRED_FILE}")
     print(f"  日志: {PROJECTS_DIR}")
+    if DISC_PORT:
+        print(f"  发现: UDP {DISC_PORT}")
+        threading.Thread(target=_discovery_loop, daemon=True).start()
     _hist_busy = True                                # 启动即后台预热 30 天扫描
     threading.Thread(target=_hist_compute, daemon=True).start()
     _wx_busy = True                                  # 天气也预热,且永不阻塞请求

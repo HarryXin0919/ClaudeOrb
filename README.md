@@ -84,14 +84,15 @@ You should see `Claude 用量代理 → http://0.0.0.0:8787/usage`. Open
 `http://localhost:8787/usage` in a browser — you should get JSON with `session_pct`,
 `week_pct`, `tok_today`, etc.
 
-- **Find your PC's LAN IP** (`ipconfig` / `ip addr`) — you'll need it for the firmware.
+- No need to look up your PC's IP — the screen **finds the proxy by UDP broadcast**
+  (port 8788) and follows it if your PC's IP changes.
 - **Allow it through the firewall**: when prompted, let Python accept inbound
-  connections (it serves on port `8787`).
+  connections (TCP `8787` + UDP `8788`).
 - **Can't reach `api.anthropic.com` directly** (e.g. mainland China)? Route the proxy
   through your local HTTP proxy: `UPSTREAM_PROXY=http://127.0.0.1:7890 python proxy/claude_limits_proxy.py`.
 - **Security:** the proxy listens on your LAN and never returns your OAuth token —
   only derived percentages. On a shared/untrusted network, set `PROXY_TOKEN=<secret>`
-  and append `?token=<secret>` to `PROXY_URL` in the firmware (or send
+  and set `#define NET_PROXY_QUERY "?token=<secret>"` in the firmware (or send
   `Authorization: Bearer <secret>`); requests without it get 401.
 
 Keep it running. See [Autostart](#autostart-optional) to launch it at login.
@@ -103,9 +104,11 @@ Keep it running. See [Autostart](#autostart-optional) to launch it at login.
 1. Install libraries (Library Manager): **GFX Library for Arduino** (by *moononournation*)
    and **ArduinoJson**.
 2. Open `firmware/claude_orb/claude_orb.ino`.
-3. Edit the top of the file:
-   - `WIFI_SSID` / `WIFI_PASS` — your **2.4 GHz** network (ESP32‑S3 has no 5 GHz).
-   - `PROXY_URL` — `http://<your‑PC‑LAN‑IP>:8787/usage`.
+3. Optionally edit the `NET_DEF_*` defaults at the top (2.4 GHz WiFi only) — or just
+   flash as-is: if the screen can't join WiFi it opens a **setup hotspot**
+   (`ClaudeOrb-Setup`); join it from your phone, the config page pops up (or open
+   `http://192.168.4.1`), pick your WiFi and save. The proxy is auto-discovered, so
+   there's no IP to type. Re-enter setup anytime by **holding BOOT for 3 s**.
 4. Board settings:
    - Board: **ESP32S3 Dev Module**
    - **USB CDC On Boot: Enabled**
@@ -178,7 +181,7 @@ generic init in the GFX library is for a different panel and will glitch.
 | Symptom | Fix |
 |---|---|
 | Screen black | Wrong `RST_PIN` / pins for your board variant — see above. |
-| `NO DATA` on screen | Proxy not reachable. Open `http://<PC-IP>:8787/usage` from your phone — if it fails, it's the **firewall** or wrong `PROXY_URL`. |
+| `NO DATA` on screen | Proxy not reachable. Open `http://<PC-IP>:8787/usage` from your phone — if it fails, it's the **firewall** (allow TCP 8787 + UDP 8788 for Python). Discovery retries automatically every ~3 polls. |
 | Proxy returns `ok:false` / 401 | Your Claude login/token expired — open Claude Code (it refreshes the token), or `/login` again. |
 | Proxy can't reach Anthropic | Set `UPSTREAM_PROXY` (see step 1). |
 | Wi‑Fi never connects | It must be **2.4 GHz**. |
