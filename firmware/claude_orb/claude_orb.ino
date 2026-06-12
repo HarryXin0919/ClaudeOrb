@@ -1,14 +1,18 @@
 /* ============================================================================
-   ClaudeOrb —— phone-style launcher on Waveshare ESP32-S3-Touch-LCD-1.85B (ST77916 360x360)
-   Home: app icon grid (Claude / Clock / Weather / Setup) + status bar (time, battery).
-   Tap an icon to open an app; BOOT (GPIO0) = home button; hold BOOT 3s = WiFi portal.
-   - Claude:  usage dashboard, 2 pages (swipe to flip)
-   - Clock:   big digital clock w/ seconds, SESSION usage ring + seconds sweep on bezel
-   - Weather: now + 5-day forecast   - Setup: network info
+   ClaudeOrb — phone-style launcher on Waveshare ESP32-S3-Touch-LCD-1.85B (ST77916 360x360)
+   Home: 2x3 app icon grid (Claude / Clock / Weather / Timer / Stopwatch / Setup)
+   + status bar (time, battery pill). Tap an icon to open an app; BOOT (GPIO0)
+   = home button; hold BOOT 3s = WiFi setup portal.
+   - Claude:    usage dashboard, 2 pages (swipe to flip)
+   - Clock:     digital clock w/ seconds; bezel = anti-aliased SESSION usage ring
+   - Timer:     pomodoro countdown on the ring (5/10/25/45 min presets,
+                keeps running in background, jumps back when done)
+   - Stopwatch: ring sweeps once per minute
+   - Weather:   now + 5-day forecast      - Setup: network info
    Data from claude_limits_proxy.py; polling runs on a background task (core 0).
 
    FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=16M,PSRAM=opi
-   (PSRAM=opi 给 Arduino_Canvas 帧缓冲；电量来自 BQ27220 @0x55)
+   (PSRAM=opi feeds the Arduino_Canvas framebuffer; battery from BQ27220 @0x55)
    ============================================================================ */
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -78,8 +82,18 @@ struct Usage {
   uint32_t fetchMs = 0;
 } U;
 uint32_t lastPoll = 0, lastRender = 0;
-int app = 0;                          // 0=主屏(图标) 1=Claude 2=Clock 3=Weather 4=Setup;BOOT=Home键
+int app = 0;                          // 0=主屏 1=Claude 2=Clock 3=Weather 4=Timer 5=Stopwatch 6=Setup;BOOT=Home键
 int page = 0;
+// Timer(番茄钟)状态:切回主屏也继续走,到点自动跳回提醒
+const int TMR_PRESETS[4] = {5, 10, 25, 45};      // 分钟
+int      tmrPre = 2;                              // 默认 25min
+uint32_t tmrLeftMs = 25 * 60000UL;                // 暂停时剩余
+uint32_t tmrEndMs = 0;
+bool     tmrRun = false, tmrDone = false;
+long tmrLeft() { return tmrRun ? (long)(tmrEndMs - millis()) : (long)tmrLeftMs; }
+// Stopwatch 状态
+uint32_t stwAcc = 0, stwT0 = 0; bool stwRun = false;
+uint32_t stwNow() { return stwAcc + (stwRun ? millis() - stwT0 : 0); }
 bool timeOK = false;
 int lastBtn = HIGH; uint32_t btnDownMs = 0;
 volatile uint32_t lastOnline = 0;     // 后台拉取任务写,主循环读
@@ -168,30 +182,29 @@ void drawBolt(Arduino_GFX* g, int x, int y, uint16_t c) {   // ~6x11 小闪电
   g->fillTriangle(x + 4, y,     x,     y + 6, x + 3, y + 6,  c);
   g->fillTriangle(x + 3, y + 5, x + 6, y + 5, x + 2, y + 11, c);
 }
-// Compact battery pill: rounded frame + fill level + % inside; charging = green fill + bolt.
-// One component for every screen, placed on round-display anchor points:
-// home/Clock on the vertical axis, Claude pages in the bottom bar
+// 紧凑电池胶囊:圆角框 + 电量填充 + %数字嵌中,充电=绿填充+左侧闪电。
+// 各屏统一用它,按圆屏部件位摆:主屏/Clock 走垂直中轴,Claude 页放底栏右侧
 void drawBatteryPill(int cx, int cy) {
   if (g_bat < 0) return;
   const int w = 34, h = 15;
   int x = cx - w / 2, y = cy - h / 2;
   uint16_t fc = g_charging ? C_GREEN : (g_bat <= 15 ? C_RED : (g_bat <= 30 ? C_AMBER : C_ORANGE));
   gfx->drawRoundRect(x, y, w, h, 4, C_DIM);
-  gfx->fillRect(x + w, cy - 3, 2, 6, C_DIM);     // positive terminal
+  gfx->fillRect(x + w, cy - 3, 2, 6, C_DIM);     // 正极头
   int fw = g_bat * (w - 4) / 100;
   if (fw > 0) gfx->fillRect(x + 2, y + 2, fw, h - 4, fc);
   char b[6]; snprintf(b, sizeof(b), "%d", g_bat);
   txt(b, cx - (int)strlen(b) * 3, y + 4, 1, C_WHITE);
   if (g_charging) drawBolt(gfx, x - 10, y + 2, C_GREEN);
 }
-// Pill anchor per app (false = this app has no pill, charging animation skips)
+// 各 App 的胶囊位置(没有的返回 false,充电动画跳过)
 bool pillPos(int& px, int& py) {
-  if (app == 0) { px = 180; py = 44;  return true; }   // home: under the time
-  if (app == 1) { px = 272; py = 298; return true; }   // Claude: bottom bar right
-  if (app == 2) { px = 180; py = 292; return true; }   // Clock: bottom of the axis
+  if (app == 0) { px = 180; py = 44;  return true; }   // 主屏:时间正下方
+  if (app == 1) { px = 272; py = 298; return true; }   // Claude:底栏右
+  if (app == 2) { px = 180; py = 292; return true; }   // Clock:中轴底部
   return false;
 }
-// Charging animation frame: redraw only the pill interior straight to output (no full flush)
+// 充电动画帧:只重画胶囊内部到 output(不整屏刷,不闪)
 void drawChargePill(int cx, int cy, int pct, int level) {
   const int w = 34, h = 15;
   int x = cx - w / 2, y = cy - h / 2;
@@ -267,7 +280,7 @@ void renderPage1() {
   uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
   gfx->fillCircle(60, 301, 5, dot);
   txt("CLAUDE CODE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
-  drawBatteryPill(272, 298);                    // bottom bar: status left, battery right
+  drawBatteryPill(272, 298);                    // 底栏:左状态右电量
   pageDots(page);
 }
 
@@ -311,7 +324,7 @@ void renderPage2() {
   uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
   gfx->fillCircle(60, 301, 5, dot);
   txt("LIVE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
-  drawBatteryPill(272, 298);                    // bottom bar aligned with page 1
+  drawBatteryPill(272, 298);                    // 底栏与第1页对齐:左状态右电量
   pageDots(page);
 }
 
@@ -367,55 +380,68 @@ void drawWxIcon(int cx, int cy, int code, int s) {
 
 // ---------------------- 主屏:App 图标网格(像手机一样,点图标进 App) ----------------------
 struct AppIcon { int cx, cy; const char* label; };
-const AppIcon ICONS[4] = {{112, 136, "Claude"}, {248, 136, "Clock"}, {112, 252, "Weather"}, {248, 252, "Setup"}};
+const AppIcon ICONS[6] = {
+  { 84, 140, "Claude"}, {180, 140, "Clock"},     {276, 140, "Weather"},
+  { 84, 252, "Timer"},  {180, 252, "Stopwatch"}, {276, 252, "Setup"}};
 void drawTile(int cx, int cy) {                  // iOS 风圆角图标底
-  gfx->drawRoundRect(cx - 38, cy - 38, 76, 76, 18, C_BAROFF);
-  gfx->drawRoundRect(cx - 37, cy - 37, 74, 74, 17, C_BAROFF);
+  gfx->drawRoundRect(cx - 32, cy - 32, 64, 64, 14, C_BAROFF);
+  gfx->drawRoundRect(cx - 31, cy - 31, 62, 62, 13, C_BAROFF);
 }
 void renderHome() {
   gfx->fillScreen(C_BG);
   struct tm t;
-  if (getLocalTime(&t, 50)) {                    // axis status bar: time centered, pill below
+  if (getLocalTime(&t, 50)) {                    // 中轴状态栏:时间居中,电量胶囊正下
     char hm[6]; snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
     txt(hm, CX - txtW(hm, 2) / 2, 12, 2, C_WHITE);
   }
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     drawTile(ICONS[i].cx, ICONS[i].cy);
-    txt(ICONS[i].label, ICONS[i].cx - txtW(ICONS[i].label, 1) / 2, ICONS[i].cy + 46, 1, C_DIM);
+    txt(ICONS[i].label, ICONS[i].cx - txtW(ICONS[i].label, 1) / 2, ICONS[i].cy + 40, 1, C_DIM);
   }
   // Claude 图标:真 logo
   logoAt(ICONS[0].cx - CLAUDE_LOGO_W / 2, ICONS[0].cy - CLAUDE_LOGO_H / 2);
   // Clock 图标:小表盘
   { int cx = ICONS[1].cx, cy = ICONS[1].cy;
-    gfx->fillCircle(cx, cy, 24, C_WHITE);
+    gfx->fillCircle(cx, cy, 20, C_WHITE);
     bool ok = getLocalTime(&t, 20);
     float ah = ((ok ? t.tm_hour % 12 : 10) + (ok ? t.tm_min : 8) / 60.0f) * PI / 6 - PI / 2;
     float am = (ok ? t.tm_min : 8) * PI / 30 - PI / 2;
-    gfx->drawLine(cx, cy, cx + (int)(11 * cos(ah)), cy + (int)(11 * sin(ah)), C_BG);
-    gfx->drawLine(cx, cy, cx + (int)(17 * cos(am)), cy + (int)(17 * sin(am)), C_BG);
+    gfx->drawLine(cx, cy, cx + (int)(9 * cos(ah)), cy + (int)(9 * sin(ah)), C_BG);
+    gfx->drawLine(cx, cy, cx + (int)(14 * cos(am)), cy + (int)(14 * sin(am)), C_BG);
     gfx->fillCircle(cx, cy, 2, C_ORANGE); }
   // Weather 图标:当前天气(无数据画太阳)
-  drawWxIcon(ICONS[2].cx, ICONS[2].cy, U.wxC, 14);
-  // Setup 图标:齿轮
+  drawWxIcon(ICONS[2].cx, ICONS[2].cy, U.wxC, 12);
+  // Timer 图标:沙漏
   { int cx = ICONS[3].cx, cy = ICONS[3].cy;
+    gfx->fillTriangle(cx - 10, cy - 13, cx + 10, cy - 13, cx, cy, C_ORANGE);
+    gfx->drawTriangle(cx - 10, cy + 13, cx + 10, cy + 13, cx, cy, C_ORANGE);
+    gfx->fillRect(cx - 13, cy - 17, 26, 3, C_DIM);
+    gfx->fillRect(cx - 13, cy + 14, 26, 3, C_DIM); }
+  // Stopwatch 图标:表壳+表冠+指针
+  { int cx = ICONS[4].cx, cy = ICONS[4].cy;
+    gfx->drawCircle(cx, cy + 2, 14, C_WHITE); gfx->drawCircle(cx, cy + 2, 13, C_WHITE);
+    gfx->fillRect(cx - 3, cy - 17, 6, 4, C_WHITE);
+    gfx->drawLine(cx, cy + 2, cx + 7, cy - 5, C_BLUE);
+    gfx->fillCircle(cx, cy + 2, 2, C_BLUE); }
+  // Setup 图标:齿轮
+  { int cx = ICONS[5].cx, cy = ICONS[5].cy;
     for (int i = 0; i < 8; i++) {
       float a = i * PI / 4;
-      int x1 = cx + (int)(13 * cos(a)), y1 = cy + (int)(13 * sin(a));
-      int x2 = cx + (int)(21 * cos(a)), y2 = cy + (int)(21 * sin(a));
+      int x1 = cx + (int)(11 * cos(a)), y1 = cy + (int)(11 * sin(a));
+      int x2 = cx + (int)(18 * cos(a)), y2 = cy + (int)(18 * sin(a));
       gfx->drawLine(x1, y1, x2, y2, C_DIM); gfx->drawLine(x1 + 1, y1, x2 + 1, y2, C_DIM);
       gfx->drawLine(x1, y1 + 1, x2, y2 + 1, C_DIM); gfx->drawLine(x1 - 1, y1, x2 - 1, y2, C_DIM);
     }
-    gfx->fillCircle(cx, cy, 14, C_DIM);
-    gfx->fillCircle(cx, cy, 6, C_BG); }
+    gfx->fillCircle(cx, cy, 12, C_DIM);
+    gfx->fillCircle(cx, cy, 5, C_BG); }
   drawBatteryPill(180, 44);
 }
 
 // ---------------------- Clock App:大数字时钟表盘 ----------------------
 const char* WD3[7]  = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
 const char* MO3[12] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
-// ---------- Premium ring: per-pixel anti-aliasing + angular gradient + glowing head cap ----------
-// Techniques borrowed from TFT_eSPI drawSmoothArc (edge AA) and Apple activity rings
-// (fixed gradient slope for short arcs, same-hue dim track, head-cap drop shadow)
+// ---------- 高级环渲染:逐像素抗锯齿 + 角向渐变 + 头部光帽/投影(直写帧缓冲) ----------
+// 技法对标 TFT_eSPI drawSmoothArc(边缘 AA)与 Apple 活动环(渐变斜率固定、同色底环、头帽投影)
 static inline uint16_t lerp565(uint16_t c1, uint16_t c2, float t) {
   if (t <= 0) return c1; if (t >= 1) return c2;
   int r1 = (c1 >> 11) & 0x1F, g1 = (c1 >> 5) & 0x3F, b1 = c1 & 0x1F;
@@ -428,7 +454,7 @@ static inline void fbBlend(uint16_t* fb, int x, int y, uint16_t c, float a) {
   uint16_t* p = &fb[y * 360 + x];
   *p = lerp565(*p, c, a);
 }
-// Feathered dot: solid core + 1.5px AA edge + quadratic-falloff outer glow
+// 羽化圆点:核心实心 + 1.5px AA 边 + 平方衰减外发光
 void fbDot(uint16_t* fb, float cx, float cy, float coreR, float glowR, uint16_t c, float glowA) {
   for (int y = (int)(cy - glowR) - 1; y <= (int)(cy + glowR) + 1; y++)
     for (int x = (int)(cx - glowR) - 1; x <= (int)(cx + glowR) + 1; x++) {
@@ -439,15 +465,15 @@ void fbDot(uint16_t* fb, float cx, float cy, float coreR, float glowR, uint16_t 
       fbBlend(fb, x, y, c, a);
     }
 }
-// Bezel ring: same-hue dim track + gradient usage arc (cw from 12) + head cap + seconds dot
-void drawRing(float pct, int sec) {
+// 表圈环:同色系暗底环 + 渐变弧(12点起顺时针) + 头帽投影 + 秒针光点
+// 泛化版:Clock 用量环、Timer 剩余环、Stopwatch 分钟环共用
+void drawRingEx(float fillDeg, uint16_t cEnd, int sec, bool allowFill) {
   uint16_t* fb = canvas->getFramebuffer();
   const float R = 168, W = 5, F = 1.5f;
-  float fillDeg = constrain(pct, 0.0f, 100.0f) * 3.6f;
-  uint16_t cEnd   = pctColor(pct);
+  fillDeg = constrain(fillDeg, 0.0f, 360.0f);
   uint16_t cStart = lerp565(C_BG, cEnd, 0.45f);
-  uint16_t cTrack = lerp565(C_BG, cEnd, 0.16f);  // Apple-style: track = arc color at low opacity
-  bool hasFill = U.ok && fillDeg > 0.5f;
+  uint16_t cTrack = lerp565(C_BG, cEnd, 0.16f);  // Apple 风:底环 = 弧色低不透明度
+  bool hasFill = allowFill && fillDeg > 0.5f;
   for (int y = (int)(CY - R - W - F) - 1; y <= (int)(CY + R + W + F) + 1; y++) {
     float dy = y - CY;
     float lim2 = (R + W + F) * (R + W + F) - dy * dy; if (lim2 <= 0) continue;
@@ -464,20 +490,23 @@ void drawRing(float pct, int sec) {
       fbBlend(fb, x, y, col, a);
     }
   }
-  if (hasFill) {                                 // head: dark halo (shadow) first, then bright cap
+  if (hasFill) {                                 // 头部:先压一圈暗晕(投影)再画光帽 → 立体
     float hx = CX + R * sinf(fillDeg * DEG_TO_RAD), hy = CY - R * cosf(fillDeg * DEG_TO_RAD);
     fbDot(fb, hx, hy, 0, W + 7, C_BG, 0.55f);
     fbDot(fb, hx, hy, W - 0.5f, W + 5, lerp565(cEnd, C_WHITE, 0.3f), 0.3f);
   }
-  if (sec >= 0) {                                // seconds: white glow dot sweeps the ring
+  if (sec >= 0) {                                // 秒针:白色光点沿环扫
     float sx = CX + R * sinf(sec * 6 * DEG_TO_RAD), sy = CY - R * cosf(sec * 6 * DEG_TO_RAD);
     fbDot(fb, sx, sy, 3.2f, 9, C_WHITE, 0.35f);
   }
 }
+void drawRing(float pct, int sec) {              // Clock 用量环(颜色随用量档位)
+  drawRingEx(constrain(pct, 0.0f, 100.0f) * 3.6f, pctColor(pct), sec, U.ok);
+}
 void renderClock() {
   gfx->fillScreen(C_BG);
-  struct tm t; bool ok = getLocalTime(&t, 50);   // SNTP syncs in background; shows once valid
-  drawRing(U.sessionPct, ok ? t.tm_sec : -1);    // bezel = SESSION usage ring + seconds
+  struct tm t; bool ok = getLocalTime(&t, 50);   // SNTP 后台同步,成功即显示
+  drawRing(U.sessionPct, ok ? t.tm_sec : -1);    // 表圈 = SESSION 用量环 + 秒针
   logoAt(CX - CLAUDE_LOGO_W / 2, 46);
 
   char hm[6] = "--:--", ss[3] = "--";
@@ -488,7 +517,7 @@ void renderClock() {
   int tw = txtW(hm, 8), sw = txtW(ss, 2);
   int x0 = CX - (tw + 8 + sw) / 2;
   txt(hm, x0, 132, 8, C_WHITE);
-  txt(ss, x0 + tw + 8, 180, 2, C_ORANGE);        // seconds, bottom-aligned
+  txt(ss, x0 + tw + 8, 180, 2, C_ORANGE);        // 秒,底部对齐
   if (ok) {
     char ds[16]; snprintf(ds, sizeof(ds), "%s %s %d", WD3[t.tm_wday], MO3[t.tm_mon], t.tm_mday);
     txt(ds, CX - txtW(ds, 2) / 2, 218, 2, C_ORANGE);
@@ -499,7 +528,7 @@ void renderClock() {
     txt(ts, CX - (w + 8) / 2, 248, 2, C_DIM);
     gfx->drawCircle(CX - (w + 8) / 2 + w + 4, 250, 2, C_DIM);
   }
-  drawBatteryPill(180, 292);                     // bottom of the vertical axis
+  drawBatteryPill(180, 292);                     // 中轴底部,表盘部件位
 }
 
 // ---------------------- Weather App:当前 + 5天预报 ----------------------
@@ -525,6 +554,41 @@ void renderWeather() {
     char hl[16]; snprintf(hl, sizeof(hl), "%d / %d", U.days[i].hi, U.days[i].lo);
     txt(hl, 290 - txtW(hl, 2), y, 2, C_WHITE);
   }
+}
+
+// ---------------------- Timer App:番茄钟(环=剩余时间) ----------------------
+void renderTimer() {
+  gfx->fillScreen(C_BG);
+  long left = tmrLeft(); if (left < 0) left = 0;
+  float frac = (float)left / (TMR_PRESETS[tmrPre] * 60000.0f);
+  drawRingEx(frac * 360, C_ORANGE, -1, left > 0);
+  txt("TIMER", CX - txtW("TIMER", 2) / 2, 64, 2, C_DIM);
+  if (tmrDone) {
+    bool on = (millis() / 400) & 1;
+    txt("TIME'S UP", CX - txtW("TIME'S UP", 4) / 2, 158, 4, on ? C_RED : C_DIM);
+    txt("tap to reset", CX - txtW("tap to reset", 1) / 2, 220, 1, C_DIM);
+  } else {
+    char b[8]; snprintf(b, sizeof(b), "%02ld:%02ld", left / 60000, (left / 1000) % 60);
+    txt(b, CX - txtW(b, 7) / 2, 144, 7, C_WHITE);
+    char p[10]; snprintf(p, sizeof(p), "%d min", TMR_PRESETS[tmrPre]);
+    txt(p, CX - txtW(p, 2) / 2, 222, 2, C_ORANGE);
+    const char* hint = tmrRun ? "tap to pause" : "tap: start   top: preset   swipe: reset";
+    txt(hint, CX - txtW(hint, 1) / 2, 252, 1, C_DIM);
+  }
+}
+
+// ---------------------- Stopwatch App:秒表(环=每分钟一圈) ----------------------
+void renderStopwatch() {
+  gfx->fillScreen(C_BG);
+  uint32_t ms = stwNow();
+  drawRingEx((ms % 60000) * 360.0f / 60000.0f, C_BLUE, -1, ms > 0);
+  txt("STOPWATCH", CX - txtW("STOPWATCH", 2) / 2, 64, 2, C_DIM);
+  char b[8]; snprintf(b, sizeof(b), "%02lu:%02lu", (unsigned long)(ms / 60000), (unsigned long)((ms / 1000) % 60));
+  txt(b, CX - txtW(b, 7) / 2, 144, 7, C_WHITE);
+  char d[4]; snprintf(d, sizeof(d), ".%lu", (unsigned long)((ms / 100) % 10));
+  txt(d, CX + txtW(b, 7) / 2 + 4, 184, 2, C_BLUE);
+  const char* hint = stwRun ? "tap: stop   swipe: reset" : "tap: start   swipe: reset";
+  txt(hint, CX - txtW(hint, 1) / 2, 252, 1, C_DIM);
 }
 
 // ---------------------- Setup App:网络信息 ----------------------
@@ -559,7 +623,14 @@ String computeSig() {
     for (int i = 0; i < U.nDays; i++) s += String(U.days[i].c) + String(U.days[i].hi) + String(U.days[i].lo);
     return s;
   }
-  if (app == 4)                                  // Setup:网络状态(RSSI 量化防闪)
+  if (app == 4) {                                // Timer:秒级 + 状态(到点后含闪烁相位)
+    long l = tmrLeft(); if (l < 0) l = 0;
+    return "T" + String(l / 1000) + (tmrRun ? "r" : "p") + String(tmrPre)
+         + (tmrDone ? String((millis() / 400) & 1) : "");
+  }
+  if (app == 5)                                  // Stopwatch:0.1秒级
+    return "P" + String(stwNow() / 100) + (stwRun ? "r" : "p");
+  if (app == 6)                                  // Setup:网络状态(RSSI 量化防闪)
     return "S" + bt + netCfg.ssid + WiFi.localIP().toString() + String(WiFi.RSSI() / 5) + netCfg.proxyHost;
   String s = "C" + String(page) + (U.ok ? "1" : "0") + (U.stale ? "1" : "0") + bt;
   s += pctStr(U.sessionPct) + pctStr(U.weekPct)
@@ -576,7 +647,9 @@ void render() {
   if (app == 0)      renderHome();
   else if (app == 2) renderClock();
   else if (app == 3) renderWeather();
-  else if (app == 4) renderSettings();
+  else if (app == 4) renderTimer();
+  else if (app == 5) renderStopwatch();
+  else if (app == 6) renderSettings();
   else if (page == 0) renderPage1();
   else                renderPage2();
   canvas->flush();
@@ -707,14 +780,36 @@ void loop() {
   }
   lastBtn = b;
 
-  // 触摸:主屏点图标开 App;Claude 里滑动翻页;回主屏按 BOOT
+  // 计时到点:跳回 Timer 页闪烁提醒(后台也计时)
+  if (tmrRun && (long)(tmrEndMs - now) <= 0) {
+    tmrRun = false; tmrDone = true; tmrLeftMs = 0;
+    app = 4;
+  }
+
+  // 触摸:主屏点图标开 App;Claude 滑动翻页;Timer/Stopwatch 点按操作;回主屏按 BOOT
   int gst = checkGesture();
   if (gst) {
     if (app == 0 && gst == 1) {
-      for (int i = 0; i < 4; i++)
-        if (abs(tapX - ICONS[i].cx) <= 52 && abs(tapY - ICONS[i].cy) <= 56) { app = i + 1; page = 0; break; }
+      for (int i = 0; i < 6; i++)
+        if (abs(tapX - ICONS[i].cx) <= 36 && abs(tapY - ICONS[i].cy) <= 42) { app = i + 1; page = 0; break; }
     } else if (app == 1 && gst == 2) {
       page = (page + 1) % 2;
+    } else if (app == 4) {                       // Timer:点上半切预设(停时),点下半开始/暂停,滑动重置
+      if (gst == 2 || (gst == 1 && tmrDone)) {
+        tmrRun = false; tmrDone = false; tmrLeftMs = TMR_PRESETS[tmrPre] * 60000UL;
+      } else if (gst == 1) {
+        if (!tmrRun && tapY < 180) {
+          tmrPre = (tmrPre + 1) % 4; tmrLeftMs = TMR_PRESETS[tmrPre] * 60000UL;
+        } else if (tmrRun) {
+          long l = (long)(tmrEndMs - now); tmrLeftMs = l > 0 ? l : 0; tmrRun = false;
+        } else if (tmrLeftMs > 0) {
+          tmrEndMs = now + tmrLeftMs; tmrRun = true;
+        }
+      }
+    } else if (app == 5) {                       // Stopwatch:点按起停,滑动清零
+      if (gst == 2) { stwRun = false; stwAcc = 0; }
+      else if (stwRun) { stwAcc += now - stwT0; stwRun = false; }
+      else { stwT0 = now; stwRun = true; }
     }
     render(); lastRender = now;
   }
@@ -740,7 +835,7 @@ void loop() {
     if (c != g_charging) { g_charging = c; render(); lastRender = now; animLevel = 0; }
     lastChg = now;
   }
-  // Charging: rising green fill inside the pill (drawn straight to output, no full flush)
+  // 充电时胶囊内绿色填充上涨动画(只画胶囊内部到 output,不整屏刷)
   if (g_charging && g_bat >= 0 && now - lastAnim >= 90) {
     int px, py;
     if (pillPos(px, py)) {

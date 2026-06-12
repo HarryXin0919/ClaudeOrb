@@ -15,16 +15,15 @@ no organization account, nothing pasted anywhere.
 
 ```
    ┌─ Home ── app grid ──┐        ┌─ Claude ─ 2 pages ──┐        ┌─ Clock ─────────────┐
-   |    21:36   88%[▮▮]  |        |     ✻ CLAUDE        |        |  · usage ring + sec |
-   |   ┌────┐   ┌────┐   |  tap   |        MAX          |        |        ✻            |
-   |   | ✻  |   | ◷  |   |  --->  | SESSION       29%   |        |    21:36 45         |
-   |   └────┘   └────┘   |        | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  also: |    THU JUN 12       |
-   |   Claude   Clock    |        | WEEKLY        12%   |        |       26°           |
-   |   ┌────┐   ┌────┐   |  BOOT  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |  Weather (now + 5-day)     |
-   |   | ☼  |   | ⚙  |   |  <---  |   ● CLAUDE CODE     |  Setup (network info)      |
-   |   └────┘   └────┘   |        |  swipe to flip page |        |                     |
-   |   Weather  Setup    |        └─────────────────────┘        └─────────────────────┘
-   └─────────────────────┘
+   |    21:36   [88%]    |        |     ✻ CLAUDE        |        |  · usage ring + sec |
+   |                     |  tap   |        MAX          |        |        ✻            |
+   | Claude Clock Weathr |  --->  | SESSION       29%   |        |    21:36 45         |
+   |                     |        | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  also: |    THU JUN 12       |
+   | Timer  Stopw Setup  |        | WEEKLY        12%   |        |       26°           |
+   |    (2 x 3 icons)    |  BOOT  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |  Timer: pomodoro ring      |
+   |                     |  <---  |   ● CLAUDE CODE     |  Stopwatch: 1-min ring     |
+   |                     |        |  swipe to flip page |  Weather / Setup           |
+   └─────────────────────┘        └─────────────────────┘        └─────────────────────┘
 ```
 
 ---
@@ -148,8 +147,8 @@ So the proxy comes back after a reboot:
 
 ## Usage
 
-- **Home — app grid:** a phone‑style launcher. Status bar (time + battery) and four
-  apps; **tap an icon** to open one, press **BOOT** (the home button) to go back.
+- **Home — app grid:** a phone‑style launcher. Status bar (time + battery pill) and
+  six apps; **tap an icon** to open one, press **BOOT** (the home button) to go back.
 - **Claude:** the usage dashboard — page 1 has SESSION / WEEKLY gauges with live reset
   countdowns; page 2 has every limit tier (5H / WEEK / SONNET / OPUS / EXTRA), today's
   token total, and your active Claude Code session. **Swipe** (any direction) to flip.
@@ -159,6 +158,10 @@ So the proxy comes back after a reboot:
   the seconds. NTP time (`TZ_OFFSET_S` / `NTP_1` / `NTP_2` in the `.ino`).
 - **Weather:** current conditions (feels‑like / humidity / wind) + 5‑day forecast,
   from the proxy's Open‑Meteo data.
+- **Timer:** pomodoro‑style countdown drawn on the ring (5 / 10 / 25 / 45 min —
+  tap the top half to cycle presets, bottom half to start/pause, swipe to reset).
+  Keeps running in the background and flashes TIME'S UP when done.
+- **Stopwatch:** the ring sweeps once per minute; tap to start/stop, swipe to reset.
 - **Setup:** WiFi / IP / RSSI / proxy / plan / battery at a glance.
 - Data polling runs on a **background task** (core 0), so the clock and touch never
   stutter while the proxy is fetched.
