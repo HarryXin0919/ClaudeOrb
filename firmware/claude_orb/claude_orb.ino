@@ -1,11 +1,14 @@
 /* ============================================================================
-   Claude 套餐用量仪表盘 (双页) —— Waveshare ESP32-S3-Touch-LCD-1.85B (ST77916 360x360)
-   Page 1 概览: SESSION / WEEKLY 大表 + 重置倒计时。
-   Page 2 细节: 各档限额(5H/WEEK/SONNET/OPUS/EXTRA) + 今日 token + 当前活跃会话。
-   按 BOOT 键(GPIO0)翻页。数据来自 claude_limits_proxy.py。
+   ClaudeOrb —— phone-style launcher on Waveshare ESP32-S3-Touch-LCD-1.85B (ST77916 360x360)
+   Home: app icon grid (Claude / Clock / Weather / Setup) + status bar (time, battery).
+   Tap an icon to open an app; BOOT (GPIO0) = home button; hold BOOT 3s = WiFi portal.
+   - Claude:  usage dashboard, 2 pages (swipe to flip)
+   - Clock:   big digital clock w/ seconds, SESSION usage ring + seconds sweep on bezel
+   - Weather: now + 5-day forecast   - Setup: network info
+   Data from claude_limits_proxy.py; polling runs on a background task (core 0).
 
    FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=16M,PSRAM=opi
-   (PSRAM=opi 给 Arduino_Canvas 帧缓冲；右上角电量来自 BQ27220 @0x55)
+   (PSRAM=opi 给 Arduino_Canvas 帧缓冲；电量来自 BQ27220 @0x55)
    ============================================================================ */
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -26,8 +29,8 @@
 #define NET_DEF_PROXY_PORT 8787
 #define NET_AP_NAME        "ClaudeOrb-Setup"    // setup hotspot name
 #include "net_portal.h"
-const uint32_t POLL_MS   = 12000;    // poll interval (proxy caches: limits 180s / details 8s)
-const uint32_t RENDER_MS = 1000;     // content-signature check (only flushes on change; home clock needs minute accuracy)
+const uint32_t POLL_MS   = 12000;    // poll interval (background task; proxy caches: limits 180s / details 8s)
+const uint32_t RENDER_MS = 100;      // content-signature check (only flushes on change; clock ticks per second)
 const long TZ_OFFSET_S   = 8 * 3600; // your UTC offset in seconds (e.g. UTC+8)
 const char* NTP_1 = "pool.ntp.org";
 const char* NTP_2 = "ntp.aliyun.com";
@@ -56,10 +59,12 @@ const uint16_t C_WHITE  = RGB565(238, 232, 226);
 const uint16_t C_GREEN  = RGB565(120, 210, 140);
 const uint16_t C_AMBER  = RGB565(241, 196, 15);
 const uint16_t C_RED    = RGB565(231, 88, 70);
+const uint16_t C_BLUE   = RGB565(92, 156, 255);
 
 const int CX = 180, CY = 180;
 
 // ---------------------- 数据 ----------------------
+struct WxDay { char d[6]; int c, hi, lo; };
 struct Usage {
   bool ok = false, stale = false, extraEnabled = false;
   float sessionPct = 0, weekPct = 0, sonnetPct = 0, opusPct = -1, extraPct = -1;
@@ -67,14 +72,18 @@ struct Usage {
   int64_t tokToday = 0, activeTok = 0;
   int   activeMsgs = 0;
   char  plan[16] = "", activeProj[24] = "";
-  int   wxT = 0, wxC = -1;           // current temp / weather code (home watch face)
+  int   wxT = 0, wxC = -1;           // 当前气温/天气码
+  int   wxFeels = 0, wxHum = 0, wxWind = 0;
+  WxDay days[5]; int nDays = 0;      // 5天预报(Weather App 用)
   uint32_t fetchMs = 0;
 } U;
 uint32_t lastPoll = 0, lastRender = 0;
-int app = 0;                          // 0 = home watch face, 1 = Claude dashboard (tap to enter, BOOT toggles)
+int app = 0;                          // 0=主屏(图标) 1=Claude 2=Clock 3=Weather 4=Setup;BOOT=Home键
 int page = 0;
+bool timeOK = false;
 int lastBtn = HIGH; uint32_t btnDownMs = 0;
-uint32_t lastOnline = 0; int pollFails = 0;
+volatile uint32_t lastOnline = 0;     // 后台拉取任务写,主循环读
+volatile int pollFails = 0;
 
 // ---------------------- 工具 ----------------------
 void txt(const String& s, int x, int y, uint8_t size, uint16_t color) {
@@ -193,10 +202,11 @@ bool readTouchRaw(uint8_t& fingers, int& x, int& y) {
   y = ((yh & 0x0F) << 8) | yl;
   return true;
 }
-// Gesture: 0 = none, 1 = tap, 2 = swipe (any direction, >50px; touch axes may be rotated/mirrored)
+// 手势:0=无 1=轻点(坐标在 tapX/tapY) 2=滑动(任意方向,位移>50;滑动不分方向规避坐标轴旋转/镜像)
+int tapX = 0, tapY = 0;
 int checkGesture() {
   uint8_t fn = 0; int x = 0, y = 0;
-  if (!readTouchRaw(fn, x, y)) fn = 0;             // asleep/NACK = no touch
+  if (!readTouchRaw(fn, x, y)) fn = 0;             // 休眠/NACK 当作无触摸
   uint32_t now = millis();
   if (fn > 0) {
     if (!touchActive) { touchActive = true; swStartX = x; swStartY = y; swStart = now; }
@@ -208,7 +218,7 @@ int checkGesture() {
     int dx = swCurX - swStartX, dy = swCurY - swStartY;
     int d = max(abs(dx), abs(dy));
     if (now - swStart < 900 && d > 50) return 2;
-    if (now - swStart < 400 && d < 20) return 1;
+    if (now - swStart < 400 && d < 20) { tapX = swStartX; tapY = swStartY; return 1; }
   }
   return 0;
 }
@@ -291,29 +301,138 @@ void renderPage2() {
   pageDots(page);
 }
 
-// ---------------------- Home watch face (Claude dashboard is an "app" you tap into) ----------------------
-const char* WD3[7]  = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
-const char* MO3[12] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
+// ---------------------- 天气图标/文案(Weather App + 图标网格共用) ----------------------
+int wxType(int c) {                              // 0晴 1多云 2阴 3雾 4雨 5雪 6雷
+  if (c < 0)  return 2;
+  if (c <= 0) return 0;
+  if (c <= 2) return 1;
+  if (c == 3) return 2;
+  if (c == 45 || c == 48) return 3;
+  if ((c >= 71 && c <= 77) || c == 85 || c == 86) return 5;
+  if (c >= 95) return 6;
+  if ((c >= 51 && c <= 67) || (c >= 80 && c <= 82)) return 4;
+  return 2;
+}
+const char* wxText(int c) {
+  switch (wxType(c)) {
+    case 0: return "Clear";  case 1: return "P.Cloudy"; case 2: return "Cloudy";
+    case 3: return "Fog";    case 4: return "Rain";     case 5: return "Snow";
+    default: return "Storm";
+  }
+}
+void wxCloud(int cx, int cy, int s, uint16_t c) {
+  gfx->fillCircle(cx - s, cy + s / 2, s * 6 / 10, c);
+  gfx->fillCircle(cx + s, cy + s / 2, s * 6 / 10, c);
+  gfx->fillCircle(cx, cy - s / 3, s, c);
+  gfx->fillRect(cx - s - s * 6 / 10, cy + s / 2 - s * 6 / 10 + 1, (s + s * 6 / 10) * 2, s * 6 / 10, c);
+}
+void wxSun(int cx, int cy, int r) {
+  gfx->fillCircle(cx, cy, r, C_ORANGE);
+  for (int i = 0; i < 8; i++) {
+    float a = i * PI / 4;
+    gfx->drawLine(cx + (r + 2) * cos(a), cy + (r + 2) * sin(a), cx + (r + 5) * cos(a), cy + (r + 5) * sin(a), C_ORANGE);
+  }
+}
+void drawWxIcon(int cx, int cy, int code, int s) {
+  switch (wxType(code)) {
+    case 0: wxSun(cx, cy, s); break;
+    case 1: wxSun(cx - s * 2 / 3, cy - s / 2, s * 2 / 3); wxCloud(cx + s / 4, cy + s / 4, s * 3 / 4, C_DIM); break;
+    case 2: wxCloud(cx, cy, s, C_DIM); break;
+    case 3: for (int i = 0; i < 4; i++) gfx->drawFastHLine(cx - s, cy - s / 2 + i * (s / 2), s * 2, C_DIM); break;
+    case 4: wxCloud(cx, cy - s / 3, s * 3 / 4, C_DIM);
+            for (int i = -1; i <= 1; i++) gfx->drawLine(cx + i * s / 2, cy + s * 2 / 3, cx + i * s / 2 - 2, cy + s, C_BLUE);
+            break;
+    case 5: wxCloud(cx, cy - s / 3, s * 3 / 4, C_DIM);
+            for (int i = -1; i <= 1; i++) gfx->fillCircle(cx + i * s / 2, cy + s * 5 / 6, 2, C_WHITE);
+            break;
+    case 6: wxCloud(cx, cy - s / 3, s * 3 / 4, C_DIM);
+            gfx->fillTriangle(cx - 1, cy + s / 3, cx + 4, cy + s / 3, cx - 4, cy + s, C_AMBER);
+            break;
+  }
+}
+
+// ---------------------- 主屏:App 图标网格(像手机一样,点图标进 App) ----------------------
+struct AppIcon { int cx, cy; const char* label; };
+const AppIcon ICONS[4] = {{112, 136, "Claude"}, {248, 136, "Clock"}, {112, 252, "Weather"}, {248, 252, "Setup"}};
+void drawTile(int cx, int cy) {                  // iOS 风圆角图标底
+  gfx->drawRoundRect(cx - 38, cy - 38, 76, 76, 18, C_BAROFF);
+  gfx->drawRoundRect(cx - 37, cy - 37, 74, 74, 17, C_BAROFF);
+}
 void renderHome() {
   gfx->fillScreen(C_BG);
-  // 60 bezel tick dots double as the SESSION usage ring (clockwise from 12 o'clock)
-  int lit = U.ok ? (int)round(constrain(U.sessionPct, 0.0f, 100.0f) * 0.6f) : 0;
-  for (int i = 0; i < 60; i++) {
-    float a = (i * 6 - 90) * DEG_TO_RAD;
-    int x = CX + (int)round(170 * cos(a)), y = CY + (int)round(170 * sin(a));
-    gfx->fillCircle(x, y, 2, i < lit ? pctColor(U.sessionPct) : C_BAROFF);
+  struct tm t;
+  if (getLocalTime(&t, 50)) {                    // 状态栏一行:时间居左 电量居右
+    char hm[6]; snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
+    txt(hm, 104, 16, 2, C_WHITE);
   }
-  logoAt(CX - CLAUDE_LOGO_W / 2, 46);            // tap anywhere to open the Claude dashboard
+  for (int i = 0; i < 4; i++) {
+    drawTile(ICONS[i].cx, ICONS[i].cy);
+    txt(ICONS[i].label, ICONS[i].cx - txtW(ICONS[i].label, 1) / 2, ICONS[i].cy + 46, 1, C_DIM);
+  }
+  // Claude 图标:真 logo
+  logoAt(ICONS[0].cx - CLAUDE_LOGO_W / 2, ICONS[0].cy - CLAUDE_LOGO_H / 2);
+  // Clock 图标:小表盘
+  { int cx = ICONS[1].cx, cy = ICONS[1].cy;
+    gfx->fillCircle(cx, cy, 24, C_WHITE);
+    bool ok = getLocalTime(&t, 20);
+    float ah = ((ok ? t.tm_hour % 12 : 10) + (ok ? t.tm_min : 8) / 60.0f) * PI / 6 - PI / 2;
+    float am = (ok ? t.tm_min : 8) * PI / 30 - PI / 2;
+    gfx->drawLine(cx, cy, cx + (int)(11 * cos(ah)), cy + (int)(11 * sin(ah)), C_BG);
+    gfx->drawLine(cx, cy, cx + (int)(17 * cos(am)), cy + (int)(17 * sin(am)), C_BG);
+    gfx->fillCircle(cx, cy, 2, C_ORANGE); }
+  // Weather 图标:当前天气(无数据画太阳)
+  drawWxIcon(ICONS[2].cx, ICONS[2].cy, U.wxC, 14);
+  // Setup 图标:齿轮
+  { int cx = ICONS[3].cx, cy = ICONS[3].cy;
+    for (int i = 0; i < 8; i++) {
+      float a = i * PI / 4;
+      int x1 = cx + (int)(13 * cos(a)), y1 = cy + (int)(13 * sin(a));
+      int x2 = cx + (int)(21 * cos(a)), y2 = cy + (int)(21 * sin(a));
+      gfx->drawLine(x1, y1, x2, y2, C_DIM); gfx->drawLine(x1 + 1, y1, x2 + 1, y2, C_DIM);
+      gfx->drawLine(x1, y1 + 1, x2, y2 + 1, C_DIM); gfx->drawLine(x1 - 1, y1, x2 - 1, y2, C_DIM);
+    }
+    gfx->fillCircle(cx, cy, 14, C_DIM);
+    gfx->fillCircle(cx, cy, 6, C_BG); }
+  drawBattery(228, 18, g_bat, g_charging);       // 与时间同行,靠右
+}
 
-  struct tm t; bool ok = getLocalTime(&t, 50);   // SNTP syncs in background; shows once valid
-  char hm[6] = "--:--";
-  if (ok) snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
-  txt(hm, CX - txtW(hm, 9) / 2, 128, 9, C_WHITE);
+// ---------------------- Clock App:大数字时钟表盘 ----------------------
+const char* WD3[7]  = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
+const char* MO3[12] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
+// Ring progress bar: continuous round-capped arc from dense dots, clockwise from 12 o'clock
+void ringArc(float fromDeg, float toDeg, int r, int dotR, uint16_t color) {
+  for (float d = fromDeg; d <= toDeg; d += 1.2f) {
+    float a = (d - 90) * DEG_TO_RAD;
+    gfx->fillCircle(CX + (int)round(r * cos(a)), CY + (int)round(r * sin(a)), dotR, color);
+  }
+}
+void renderClock() {
+  gfx->fillScreen(C_BG);
+  // Bezel ring = SESSION usage (clockwise from 12): dim track + lit arc
+  ringArc(0, 360, 170, 3, C_BAROFF);
+  if (U.ok && U.sessionPct > 0)
+    ringArc(0, constrain(U.sessionPct, 0.0f, 100.0f) * 3.6f, 170, 3, pctColor(U.sessionPct));
+  logoAt(CX - CLAUDE_LOGO_W / 2, 46);
+
+  struct tm t; bool ok = getLocalTime(&t, 50);   // SNTP 后台同步,成功即显示
+  char hm[6] = "--:--", ss[3] = "--";
+  if (ok) {
+    snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
+    snprintf(ss, sizeof(ss), "%02d", t.tm_sec);
+  }
+  int tw = txtW(hm, 8), sw = txtW(ss, 2);
+  int x0 = CX - (tw + 8 + sw) / 2;
+  txt(hm, x0, 132, 8, C_WHITE);
+  txt(ss, x0 + tw + 8, 180, 2, C_ORANGE);        // 秒,底部对齐
+  if (ok) {                                      // seconds: white dot sweeps the bezel (on top of the ring)
+    float a = (t.tm_sec * 6 - 90) * DEG_TO_RAD;
+    gfx->fillCircle(CX + (int)round(170 * cos(a)), CY + (int)round(170 * sin(a)), 5, C_WHITE);
+  }
   if (ok) {
     char ds[16]; snprintf(ds, sizeof(ds), "%s %s %d", WD3[t.tm_wday], MO3[t.tm_mon], t.tm_mday);
     txt(ds, CX - txtW(ds, 2) / 2, 218, 2, C_ORANGE);
   }
-  if (U.wxC >= 0) {                              // current temp (proxy's Open-Meteo data)
+  if (U.wxC >= 0) {
     char ts[8]; snprintf(ts, sizeof(ts), "%d", U.wxT);
     int w = txtW(ts, 2);
     txt(ts, CX - (w + 8) / 2, 248, 2, C_DIM);
@@ -322,15 +441,66 @@ void renderHome() {
   drawBattery(290, 289, g_bat, g_charging);
 }
 
+// ---------------------- Weather App:当前 + 5天预报 ----------------------
+void renderWeather() {
+  gfx->fillScreen(C_BG);
+  txt("WEATHER", CX - txtW("WEATHER", 2) / 2, 18, 2, C_DIM);
+  if (U.wxC < 0) {
+    txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 170, 3, C_RED);
+    return;
+  }
+  drawWxIcon(105, 84, U.wxC, 16);
+  char ts[8]; snprintf(ts, sizeof(ts), "%d", U.wxT);
+  txt(ts, 150, 56, 7, C_WHITE);
+  gfx->drawCircle(150 + txtW(ts, 7) + 8, 62, 4, C_WHITE);
+  txt(wxText(U.wxC), CX - txtW(wxText(U.wxC), 2) / 2, 122, 2, C_GLOW);
+  char m[44]; snprintf(m, sizeof(m), "feels %d  hum %d%%  wind %dkm/h", U.wxFeels, U.wxHum, U.wxWind);
+  txt(m, CX - txtW(m, 1) / 2, 148, 1, C_DIM);
+  gfx->drawFastHLine(60, 164, 240, C_BAROFF);
+  for (int i = 0; i < U.nDays && i < 5; i++) {
+    int y = 178 + i * 26;
+    txt(U.days[i].d, 70, y, 2, C_DIM);
+    drawWxIcon(165, y + 6, U.days[i].c, 8);
+    char hl[16]; snprintf(hl, sizeof(hl), "%d / %d", U.days[i].hi, U.days[i].lo);
+    txt(hl, 290 - txtW(hl, 2), y, 2, C_WHITE);
+  }
+}
+
+// ---------------------- Setup App:网络信息 ----------------------
+void renderSettings() {
+  gfx->fillScreen(C_BG);
+  txt("SETUP", CX - txtW("SETUP", 2) / 2, 18, 2, C_DIM);
+  logoAt(CX - CLAUDE_LOGO_W / 2, 40);
+  const char* k[6] = {"WIFI", "IP", "RSSI", "PROXY", "PLAN", "BAT"};
+  String v[6] = { netCfg.ssid, WiFi.localIP().toString(), String(WiFi.RSSI()) + " dBm",
+                  netCfg.proxyHost, String(U.plan), String(g_bat) + "%" };
+  for (int i = 0; i < 6; i++) {
+    int y = 96 + i * 28;
+    txt(k[i], 70, y, 2, C_DIM);
+    txt(v[i], 290 - txtW(v[i], 2), y, 2, C_WHITE);
+  }
+  txt("hold BOOT 3s = WiFi setup", CX - txtW("hold BOOT 3s = WiFi setup", 1) / 2, 286, 1, C_ORANGE);
+}
+
 // 内容签名(分钟级；不含秒级 idle)——只在内容变化时才刷出，消除周期性闪屏
 String lastSig = "";
 String computeSig() {
-  if (app == 0) {                                // home: minute + battery + usage + temp
-    struct tm t; bool ok = getLocalTime(&t, 20);
-    return "H" + String(ok ? t.tm_hour * 60 + t.tm_min : -1) + String(g_bat) + (g_charging ? "C" : "c")
+  struct tm t; bool ok = getLocalTime(&t, 20);
+  String mn = String(ok ? t.tm_hour * 60 + t.tm_min : -1);
+  String bt = String(g_bat) + (g_charging ? "C" : "c");
+  if (app == 0)                                  // 主屏:分钟 + 电量 + 天气图标
+    return "L" + mn + bt + String(U.wxC);
+  if (app == 2)                                  // Clock:秒级 + 电量 + 用量环 + 气温
+    return "K" + mn + ":" + String(ok ? t.tm_sec : -1) + bt
          + (U.ok ? pctStr(U.sessionPct) : "-") + String(U.wxC >= 0 ? U.wxT : -99);
+  if (app == 3) {                                // Weather:天气字段
+    String s = "W" + bt + String(U.wxT) + String(U.wxC) + String(U.wxHum) + String(U.wxWind);
+    for (int i = 0; i < U.nDays; i++) s += String(U.days[i].c) + String(U.days[i].hi) + String(U.days[i].lo);
+    return s;
   }
-  String s = String(page) + (U.ok ? "1" : "0") + (U.stale ? "1" : "0") + String(g_bat) + (g_charging ? "C" : "c");
+  if (app == 4)                                  // Setup:网络状态(RSSI 量化防闪)
+    return "S" + bt + netCfg.ssid + WiFi.localIP().toString() + String(WiFi.RSSI() / 5) + netCfg.proxyHost;
+  String s = "C" + String(page) + (U.ok ? "1" : "0") + (U.stale ? "1" : "0") + bt;
   s += pctStr(U.sessionPct) + pctStr(U.weekPct)
      + fmtReset(liveReset(U.sessionReset)) + fmtReset(liveReset(U.weekReset));
   if (page == 1)
@@ -343,6 +513,9 @@ void render() {
   if (sig == lastSig) return;                    // 没变就不重画、不刷出(不闪)
   lastSig = sig;
   if (app == 0)      renderHome();
+  else if (app == 2) renderClock();
+  else if (app == 3) renderWeather();
+  else if (app == 4) renderSettings();
   else if (page == 0) renderPage1();
   else                renderPage2();
   canvas->flush();
@@ -376,11 +549,34 @@ bool poll() {
   strlcpy(U.plan, doc["plan"] | "", sizeof(U.plan));
   strlcpy(U.activeProj, doc["active_project"] | "?", sizeof(U.activeProj));
   JsonObject wx = doc["weather"];
-  if (!wx.isNull()) { U.wxT = wx["now_t"] | 0; U.wxC = wx["now_c"] | -1; }
+  if (!wx.isNull()) {
+    U.wxT = wx["now_t"] | 0; U.wxC = wx["now_c"] | -1;
+    U.wxFeels = wx["now_feels"] | U.wxT; U.wxHum = wx["now_hum"] | 0; U.wxWind = wx["now_wind"] | 0;
+    JsonArray ds = wx["days"]; U.nDays = 0;
+    for (JsonObject d : ds) {
+      if (U.nDays >= 5) break;
+      strlcpy(U.days[U.nDays].d, d["d"] | "", sizeof(U.days[0].d));
+      U.days[U.nDays].c = d["c"] | 0; U.days[U.nDays].hi = d["hi"] | 0; U.days[U.nDays].lo = d["lo"] | 0;
+      U.nDays++;
+    }
+  }
   U.fetchMs = millis();
-  g_bat = readBattery();
-  g_charging = readCharging();
   return true;
+}
+
+// 数据拉取后台任务(核0):HTTP 最长阻塞 8 秒,放主循环会卡时钟和触摸。
+// I2C(电量/触摸)全部留在主循环,避免跨核抢总线。
+void pollTask(void*) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+    if (WiFi.status() != WL_CONNECTED) continue;
+    lastOnline = millis();
+    if (poll()) pollFails = 0;
+    else if (++pollFails >= 3) {                 // 连续拉不到 → proxy IP 可能变了,广播重找
+      netDiscoverProxy(2);
+      pollFails = 0;
+    }
+  }
 }
 
 void showNetStatus(const char* l1, const char* l2, const char* l3) {
@@ -397,8 +593,7 @@ void showSetupScreen() {
   showNetStatus("SETUP MODE", l2, "then open http://192.168.4.1");
 }
 
-// Boot-time connect: on failure, drop into the captive portal
-// (portal reboots on save or after a 5-minute timeout — never returns)
+// 开机版:连不上 → 配网门户(保存或5分钟超时都会重启,不返回)
 void connectWiFi() {
   showNetStatus("connecting wifi...", netCfg.ssid.c_str(), nullptr);
   if (netConnect(20000)) { netDiscoverProxy(2); return; }
@@ -425,67 +620,70 @@ void setup() {
   netBegin();
   connectWiFi();
   configTime(TZ_OFFSET_S, 0, NTP_1, NTP_2);
-  struct tm t; getLocalTime(&t, 6000);           // wait for first SNTP sync (best effort)
+  struct tm t; timeOK = getLocalTime(&t, 6000);
   poll();
   render();
   lastPoll = lastRender = millis();
+  xTaskCreatePinnedToCore(pollTask, "poll", 12288, nullptr, 1, nullptr, 0);  // 主循环在核1
 }
 
 void loop() {
   uint32_t now = millis();
 
-  // BOOT key: short press = toggle home/Claude, hold 3s = setup portal
+  // BOOT 键 = Home 键(短按回主屏),长按3秒进配网门户
   int b = digitalRead(BTN_PIN);
   if (lastBtn == HIGH && b == LOW) btnDownMs = now;
   if (b == LOW && btnDownMs && now - btnDownMs >= 3000) {
     showSetupScreen();
-    netStartPortal();                              // never returns (reboots on save/timeout)
+    netStartPortal();                              // 不返回(保存/超时即重启)
   }
   if (lastBtn == LOW && b == HIGH) {
     if (btnDownMs && now - btnDownMs >= 30 && now - btnDownMs < 1000) {
-      if (app == 0) { app = 1; page = 0; } else app = 0;
+      app = 0; page = 0;
       render(); lastRender = now;
     }
     btnDownMs = 0;
   }
   lastBtn = b;
 
-  // Touch: on home, tap/swipe opens Claude; in Claude, swipe flips pages (BOOT goes home)
+  // 触摸:主屏点图标开 App;Claude 里滑动翻页;回主屏按 BOOT
   int gst = checkGesture();
-  if (app == 0 && gst)            { app = 1; page = 0; render(); lastRender = now; }
-  else if (app == 1 && gst == 2)  { page = (page + 1) % 2; render(); lastRender = now; }
+  if (gst) {
+    if (app == 0 && gst == 1) {
+      for (int i = 0; i < 4; i++)
+        if (abs(tapX - ICONS[i].cx) <= 52 && abs(tapY - ICONS[i].cy) <= 56) { app = i + 1; page = 0; break; }
+    } else if (app == 1 && gst == 2) {
+      page = (page + 1) % 2;
+    }
+    render(); lastRender = now;
+  }
 
-  if (now - lastPoll >= POLL_MS) {
+  if (now - lastPoll >= POLL_MS) {               // WiFi 看护(数据拉取在后台任务)
     if (WiFi.status() != WL_CONNECTED) {
       WiFi.reconnect();
-      if (now - lastOnline > 300000UL) ESP.restart();  // offline 5 min -> reboot (falls into portal if WiFi changed)
-    } else {
-      lastOnline = now;
-      if (poll()) pollFails = 0;
-      else if (++pollFails >= 3) {                 // proxy IP may have moved -> rediscover
-        netDiscoverProxy(2);
-        pollFails = 0;
-      }
+      if (now - lastOnline > 300000UL) ESP.restart();  // 掉线5分钟重启(连不回去会落入配网门户)
     }
-    render();
-    lastPoll = lastRender = now;
-  } else if (now - lastRender >= RENDER_MS) {
+    lastPoll = now;
+  }
+
+  if (now - lastRender >= RENDER_MS) {           // 签名没变不会真正刷屏
     render();
     lastRender = now;
   }
 
-  // 充电状态每秒复查一次(插拔即时反映)
-  static uint32_t lastChg = 0, lastAnim = 0; static int animLevel = 0;
+  // 电量 10 秒一读;充电状态每秒复查(插拔即时反映)。I2C 只在主循环碰
+  static uint32_t lastBat = 0, lastChg = 0, lastAnim = 0; static int animLevel = 0;
+  if (now - lastBat >= 10000) { g_bat = readBattery(); lastBat = now; }
   if (now - lastChg >= 1000) {
     bool c = readCharging();
     if (c != g_charging) { g_charging = c; render(); lastRender = now; animLevel = 0; }
     lastChg = now;
   }
-  // 充电时电池条上涨扫描动画(只直接画电池小区域，不整屏刷)
+  // 充电时电池条上涨扫描动画(只直接画电池小区域，不整屏刷;主屏电量在状态栏)
   if (g_charging && g_bat >= 0 && now - lastAnim >= 90) {
     int full = (int)round(g_bat / 100.0 * 20);
     animLevel += 2; if (animLevel > full + 3) animLevel = 0;
-    drawChargeFrame(290, 289, g_bat, animLevel);
+    drawChargeFrame(app == 0 ? 228 : 290, app == 0 ? 18 : 289, g_bat, animLevel);
     lastAnim = now;
   }
 

@@ -14,15 +14,17 @@ no organization account, nothing pasted anywhere.
 > Works with a **Claude Pro / Max** subscription used through Claude Code.
 
 ```
-   ┌─ Home ─ watch face ─┐        ┌─ Page 1 ─ overview ─┐        ┌─ Page 2 ─ details ──┐
-   |  · · usage ring · · |        |     ✻ CLAUDE        |        |    ✻ DETAILS        |
-   |        ✻            |  tap   |        MAX          |        | 5H     2%    4h     |
-   |                     |  --->  | SESSION       29%   |  swipe | WEEK   13%   5d     |
-   |      21:36          |        | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  <-->  | SONNET 0%  OPUS --  |
-   |    THU JUN 12       |  BOOT  | WEEKLY        12%   |        | EXTRA  on           |
-   |       26°           |  <---  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |        | TODAY     145M tok  |
-   |              [▮▮▮]  |        |   ● CLAUDE CODE     |        | ACTIVE   my-project |
-   └─────────────────────┘        └─────────────────────┘        └─────────────────────┘
+   ┌─ Home ── app grid ──┐        ┌─ Claude ─ 2 pages ──┐        ┌─ Clock ─────────────┐
+   |    21:36   88%[▮▮]  |        |     ✻ CLAUDE        |        |  · usage ring + sec |
+   |   ┌────┐   ┌────┐   |  tap   |        MAX          |        |        ✻            |
+   |   | ✻  |   | ◷  |   |  --->  | SESSION       29%   |        |    21:36 45         |
+   |   └────┘   └────┘   |        | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  also: |    THU JUN 12       |
+   |   Claude   Clock    |        | WEEKLY        12%   |        |       26°           |
+   |   ┌────┐   ┌────┐   |  BOOT  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |  Weather (now + 5-day)     |
+   |   | ☼  |   | ⚙  |   |  <---  |   ● CLAUDE CODE     |  Setup (network info)      |
+   |   └────┘   └────┘   |        |  swipe to flip page |        |                     |
+   |   Weather  Setup    |        └─────────────────────┘        └─────────────────────┘
+   └─────────────────────┘
 ```
 
 ---
@@ -146,15 +148,20 @@ So the proxy comes back after a reboot:
 
 ## Usage
 
-- **Home — watch face:** big digital clock, date, current temperature (via the proxy's
-  Open‑Meteo data), battery, and a bezel ring of 60 tick dots that doubles as the
-  SESSION usage gauge. NTP time (`TZ_OFFSET_S` / `NTP_1` / `NTP_2` at the top of the `.ino`).
-- **Page 1 — overview:** SESSION (5‑hour window) and WEEKLY (all models) as big gauges
-  with live reset countdowns.
-- **Page 2 — details:** every limit tier (5H / WEEK / SONNET / OPUS / EXTRA), today's
-  token total, and your currently‑active Claude Code session (project · tokens · idle).
-- **Controls:** on home, **tap** to open the Claude dashboard; inside it, **swipe**
-  (any direction) to flip pages; press **BOOT** to jump between home and dashboard.
+- **Home — app grid:** a phone‑style launcher. Status bar (time + battery) and four
+  apps; **tap an icon** to open one, press **BOOT** (the home button) to go back.
+- **Claude:** the usage dashboard — page 1 has SESSION / WEEKLY gauges with live reset
+  countdowns; page 2 has every limit tier (5H / WEEK / SONNET / OPUS / EXTRA), today's
+  token total, and your active Claude Code session. **Swipe** (any direction) to flip.
+- **Clock:** big digital clock with ticking seconds, date, current temperature.
+  The bezel is a continuous **ring gauge** of SESSION usage (lit clockwise from 12,
+  shifting amber/red as you approach the limit); a white dot sweeps the ring with
+  the seconds. NTP time (`TZ_OFFSET_S` / `NTP_1` / `NTP_2` in the `.ino`).
+- **Weather:** current conditions (feels‑like / humidity / wind) + 5‑day forecast,
+  from the proxy's Open‑Meteo data.
+- **Setup:** WiFi / IP / RSSI / proxy / plan / battery at a glance.
+- Data polling runs on a **background task** (core 0), so the clock and touch never
+  stutter while the proxy is fetched.
 
 ---
 
