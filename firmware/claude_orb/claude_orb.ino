@@ -399,22 +399,73 @@ void renderHome() {
 // ---------------------- Clock App:大数字时钟表盘 ----------------------
 const char* WD3[7]  = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
 const char* MO3[12] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
-// Ring progress bar: continuous round-capped arc from dense dots, clockwise from 12 o'clock
-void ringArc(float fromDeg, float toDeg, int r, int dotR, uint16_t color) {
-  for (float d = fromDeg; d <= toDeg; d += 1.2f) {
-    float a = (d - 90) * DEG_TO_RAD;
-    gfx->fillCircle(CX + (int)round(r * cos(a)), CY + (int)round(r * sin(a)), dotR, color);
+// ---------- Premium ring: per-pixel anti-aliasing + angular gradient + glowing head cap ----------
+// Techniques borrowed from TFT_eSPI drawSmoothArc (edge AA) and Apple activity rings
+// (fixed gradient slope for short arcs, same-hue dim track, head-cap drop shadow)
+static inline uint16_t lerp565(uint16_t c1, uint16_t c2, float t) {
+  if (t <= 0) return c1; if (t >= 1) return c2;
+  int r1 = (c1 >> 11) & 0x1F, g1 = (c1 >> 5) & 0x3F, b1 = c1 & 0x1F;
+  int r2 = (c2 >> 11) & 0x1F, g2 = (c2 >> 5) & 0x3F, b2 = c2 & 0x1F;
+  return ((uint16_t)(r1 + (r2 - r1) * t) << 11) | ((uint16_t)(g1 + (g2 - g1) * t) << 5)
+       | (uint16_t)(b1 + (b2 - b1) * t);
+}
+static inline void fbBlend(uint16_t* fb, int x, int y, uint16_t c, float a) {
+  if (x < 0 || x >= 360 || y < 0 || y >= 360 || a <= 0) return;
+  uint16_t* p = &fb[y * 360 + x];
+  *p = lerp565(*p, c, a);
+}
+// Feathered dot: solid core + 1.5px AA edge + quadratic-falloff outer glow
+void fbDot(uint16_t* fb, float cx, float cy, float coreR, float glowR, uint16_t c, float glowA) {
+  for (int y = (int)(cy - glowR) - 1; y <= (int)(cy + glowR) + 1; y++)
+    for (int x = (int)(cx - glowR) - 1; x <= (int)(cx + glowR) + 1; x++) {
+      float d = hypotf(x - cx, y - cy), a = 0;
+      if (d <= coreR) a = 1;
+      else if (d <= coreR + 1.5f) a = (coreR + 1.5f - d) / 1.5f;
+      if (a < 1 && d < glowR) { float g = 1 - d / glowR; float ga = glowA * g * g; if (ga > a) a = ga; }
+      fbBlend(fb, x, y, c, a);
+    }
+}
+// Bezel ring: same-hue dim track + gradient usage arc (cw from 12) + head cap + seconds dot
+void drawRing(float pct, int sec) {
+  uint16_t* fb = canvas->getFramebuffer();
+  const float R = 168, W = 5, F = 1.5f;
+  float fillDeg = constrain(pct, 0.0f, 100.0f) * 3.6f;
+  uint16_t cEnd   = pctColor(pct);
+  uint16_t cStart = lerp565(C_BG, cEnd, 0.45f);
+  uint16_t cTrack = lerp565(C_BG, cEnd, 0.16f);  // Apple-style: track = arc color at low opacity
+  bool hasFill = U.ok && fillDeg > 0.5f;
+  for (int y = (int)(CY - R - W - F) - 1; y <= (int)(CY + R + W + F) + 1; y++) {
+    float dy = y - CY;
+    float lim2 = (R + W + F) * (R + W + F) - dy * dy; if (lim2 <= 0) continue;
+    float xo = sqrtf(lim2);
+    for (int x = (int)(CX - xo) - 1; x <= (int)(CX + xo) + 1; x++) {
+      float dx = x - CX;
+      float band = W + F - fabsf(hypotf(dx, dy) - R); if (band <= 0) continue;
+      float a = band >= F ? 1 : band / F;
+      uint16_t col = cTrack;
+      if (hasFill) {
+        float deg = atan2f(dx, -dy) * RAD_TO_DEG; if (deg < 0) deg += 360;
+        if (deg <= fillDeg) col = lerp565(cStart, cEnd, deg / (fillDeg < 180 ? 180 : fillDeg));
+      }
+      fbBlend(fb, x, y, col, a);
+    }
+  }
+  if (hasFill) {                                 // head: dark halo (shadow) first, then bright cap
+    float hx = CX + R * sinf(fillDeg * DEG_TO_RAD), hy = CY - R * cosf(fillDeg * DEG_TO_RAD);
+    fbDot(fb, hx, hy, 0, W + 7, C_BG, 0.55f);
+    fbDot(fb, hx, hy, W - 0.5f, W + 5, lerp565(cEnd, C_WHITE, 0.3f), 0.3f);
+  }
+  if (sec >= 0) {                                // seconds: white glow dot sweeps the ring
+    float sx = CX + R * sinf(sec * 6 * DEG_TO_RAD), sy = CY - R * cosf(sec * 6 * DEG_TO_RAD);
+    fbDot(fb, sx, sy, 3.2f, 9, C_WHITE, 0.35f);
   }
 }
 void renderClock() {
   gfx->fillScreen(C_BG);
-  // Bezel ring = SESSION usage (clockwise from 12): dim track + lit arc
-  ringArc(0, 360, 170, 3, C_BAROFF);
-  if (U.ok && U.sessionPct > 0)
-    ringArc(0, constrain(U.sessionPct, 0.0f, 100.0f) * 3.6f, 170, 3, pctColor(U.sessionPct));
+  struct tm t; bool ok = getLocalTime(&t, 50);   // SNTP syncs in background; shows once valid
+  drawRing(U.sessionPct, ok ? t.tm_sec : -1);    // bezel = SESSION usage ring + seconds
   logoAt(CX - CLAUDE_LOGO_W / 2, 46);
 
-  struct tm t; bool ok = getLocalTime(&t, 50);   // SNTP 后台同步,成功即显示
   char hm[6] = "--:--", ss[3] = "--";
   if (ok) {
     snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
@@ -423,11 +474,7 @@ void renderClock() {
   int tw = txtW(hm, 8), sw = txtW(ss, 2);
   int x0 = CX - (tw + 8 + sw) / 2;
   txt(hm, x0, 132, 8, C_WHITE);
-  txt(ss, x0 + tw + 8, 180, 2, C_ORANGE);        // 秒,底部对齐
-  if (ok) {                                      // seconds: white dot sweeps the bezel (on top of the ring)
-    float a = (t.tm_sec * 6 - 90) * DEG_TO_RAD;
-    gfx->fillCircle(CX + (int)round(170 * cos(a)), CY + (int)round(170 * sin(a)), 5, C_WHITE);
-  }
+  txt(ss, x0 + tw + 8, 180, 2, C_ORANGE);        // seconds, bottom-aligned
   if (ok) {
     char ds[16]; snprintf(ds, sizeof(ds), "%s %s %d", WD3[t.tm_wday], MO3[t.tm_mon], t.tm_mday);
     txt(ds, CX - txtW(ds, 2) / 2, 218, 2, C_ORANGE);
