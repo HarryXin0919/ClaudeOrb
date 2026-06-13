@@ -16,6 +16,7 @@ Claude 用量代理 (订阅版, 双页) —— 给 ESP32-S3 圆屏喂数据。
 """
 import os
 import re
+import sys
 import json
 import time
 import glob
@@ -31,6 +32,7 @@ PROJECTS_DIR = os.environ.get("CLAUDE_PROJECTS_DIR", os.path.expanduser("~/.clau
 PORT         = int(os.environ.get("PORT", "8787"))
 DISC_PORT    = int(os.environ.get("DISC_PORT", "8788"))   # UDP 自动发现端口(0=关闭)
 SHARED_TOKEN = os.environ.get("PROXY_TOKEN", "").strip()
+BIND_HOST    = os.environ.get("BIND_HOST", "127.0.0.1").strip()  # 默认仅环回;暴露到局域网需显式 BIND_HOST=0.0.0.0 且设 PROXY_TOKEN
 LIM_TTL      = max(60, int(os.environ.get("CACHE_TTL", "180")))
 DET_TTL      = max(3,  int(os.environ.get("DET_TTL", "8")))
 CC_UA        = os.environ.get("CC_UA", "claude-code/1.0.0")
@@ -38,7 +40,7 @@ CC_UA        = os.environ.get("CC_UA", "claude-code/1.0.0")
 UPSTREAM_PROXY = os.environ.get("UPSTREAM_PROXY", "").strip()  # 默认直连;需走代理时设 UPSTREAM_PROXY=http://127.0.0.1:7890
 _opener = urllib.request.build_opener(
     urllib.request.ProxyHandler({"http": UPSTREAM_PROXY, "https": UPSTREAM_PROXY})) if UPSTREAM_PROXY \
-    else urllib.request.build_opener()
+    else urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 空=强制真直连,忽略系统 HTTPS_PROXY/ALL_PROXY(凭据请求不走未知环境代理)
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _lim = {"ts": 0.0, "data": None}
@@ -59,17 +61,41 @@ _direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 直连
 
 
 def _safe_err(msg):
-    """返回给客户端的错误信息脱敏:本地文件路径(含用户名)只留给控制台,不出网。"""
-    msg = re.sub(r"[A-Za-z]:\\[^\s'\"]+", "<path>", str(msg))
-    return re.sub(r"(?:/[\w.~-]+){2,}", "<path>", msg)[:140]
+    """返回给客户端的错误信息脱敏:本地文件路径(含用户名)/token 只留给控制台,不出网。"""
+    msg = str(msg)
+    # 先抹掉可能内嵌的 Bearer <token>(兜底:任何异常文本里出现都不出网)
+    msg = re.sub(r"(?i)bearer\s+\S+", "Bearer <redacted>", msg)
+    # Windows 路径放宽到容忍空格(C:\Users\Harry Xin\...),只在引号/换行处停
+    msg = re.sub(r"[A-Za-z]:\\[^'\"\r\n]+", "<path>", msg)
+    # 显式抹掉凭据文件路径与 ~ 展开(防被空格/反斜杠规则漏过)
+    for p in (CRED_FILE, PROJECTS_DIR, os.path.expanduser("~")):
+        if p:
+            msg = msg.replace(p, "<path>")
+    return re.sub(r"(?:/[\w.~ -]+){2,}", "<path>", msg)[:140]
 
 
 # ---------------- 限额 (OAuth) ----------------
+class _BadToken(Exception):
+    """token 含非法字符:用固定文案上报,绝不把 token 内容带出网。"""
+    pass
+
+
 def _read_token():
     with open(CRED_FILE, "r", encoding="utf-8") as f:
         c = json.load(f)
     o = c.get("claudeAiOauth") or c.get("claude_ai_oauth") or {}
-    return o.get("accessToken") or o.get("access_token"), o.get("subscriptionType", "")
+    tok = o.get("accessToken") or o.get("access_token")
+    if tok:
+        tok = str(tok).strip()
+        # 必须是 ASCII 且不含 HTTP 头里非法的控制字符,否则 urllib 会把 "Bearer <token>"
+        # 写进 ValueError 文本并泄给客户端 —— 这里提前拦掉,只报固定文案。
+        try:
+            tok.encode("latin-1")
+        except UnicodeEncodeError:
+            raise _BadToken("invalid token format")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in tok):
+            raise _BadToken("invalid token format")
+    return tok, o.get("subscriptionType", "")
 
 
 def _reset_s(iso):
@@ -139,9 +165,17 @@ def cached_limits():
         if _lim["data"]:
             s = dict(_lim["data"]); s["stale"] = True; s["err"] = msg; return s
         return {"ok": False, "err": msg}
+    except _BadToken:
+        # token 含非法字符:固定文案,不带任何 token 内容出网。
+        print("[ERR limits] invalid token format")
+        msg = "invalid token format"
+        if _lim["data"]:
+            s = dict(_lim["data"]); s["stale"] = True; s["err"] = msg; return s
+        return {"ok": False, "err": msg}
     except Exception as e:  # noqa: BLE001
-        print("[ERR limits]", str(e)[:140])
-        msg = _safe_err(e)
+        # 原始异常文本可能内嵌 "Bearer <token>"(urllib 头校验等),控制台留全文,出网只给固定无内容文案。
+        print("[ERR limits]", _safe_err(e))
+        msg = "upstream error"
         if _lim["data"]:
             s = dict(_lim["data"]); s["stale"] = True; s["err"] = msg; return s
         return {"ok": False, "err": msg}
@@ -488,7 +522,19 @@ def _discovery_loop():
 
 
 if __name__ == "__main__":
-    print(f"Claude 用量代理(双页) → http://0.0.0.0:{PORT}/usage  (UA={CC_UA}, 限额{LIM_TTL}s 细节{DET_TTL}s)")
+    # 绑定地址安全闸:非环回(暴露到局域网)且没设 PROXY_TOKEN → 拒绝裸奔,回落到 127.0.0.1。
+    # 想真的对外服务:必须显式 BIND_HOST=0.0.0.0 且设 PROXY_TOKEN。
+    bind_host = BIND_HOST or "127.0.0.1"
+    _loopback = bind_host in ("127.0.0.1", "::1", "localhost")
+    if not _loopback and not SHARED_TOKEN:
+        print("!" * 60, file=sys.stderr)
+        print(f"[安全] BIND_HOST={bind_host} 会把用量/花费/项目名暴露到局域网,但未设 PROXY_TOKEN。",
+              file=sys.stderr)
+        print("[安全] 已强制回落到 127.0.0.1(仅本机)。要对外服务请同时设 PROXY_TOKEN。",
+              file=sys.stderr)
+        print("!" * 60, file=sys.stderr)
+        bind_host = "127.0.0.1"
+    print(f"Claude 用量代理(双页) → http://{bind_host}:{PORT}/usage  (UA={CC_UA}, 限额{LIM_TTL}s 细节{DET_TTL}s)")
     print(f"  凭据: {CRED_FILE}")
     print(f"  日志: {PROJECTS_DIR}")
     if DISC_PORT:
@@ -499,6 +545,6 @@ if __name__ == "__main__":
     _wx_busy = True                                  # 天气也预热,且永不阻塞请求
     threading.Thread(target=_wx_compute, daemon=True).start()
     try:
-        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+        ThreadingHTTPServer((bind_host, PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         print("\nbye")
