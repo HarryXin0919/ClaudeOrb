@@ -35,7 +35,7 @@ LIM_TTL      = max(60, int(os.environ.get("CACHE_TTL", "180")))
 DET_TTL      = max(3,  int(os.environ.get("DET_TTL", "8")))
 CC_UA        = os.environ.get("CC_UA", "claude-code/1.0.0")
 
-UPSTREAM_PROXY = os.environ.get("UPSTREAM_PROXY", "http://127.0.0.1:7890").strip()
+UPSTREAM_PROXY = os.environ.get("UPSTREAM_PROXY", "").strip()  # 默认直连;需走代理时设 UPSTREAM_PROXY=http://127.0.0.1:7890
 _opener = urllib.request.build_opener(
     urllib.request.ProxyHandler({"http": UPSTREAM_PROXY, "https": UPSTREAM_PROXY})) if UPSTREAM_PROXY \
     else urllib.request.build_opener()
