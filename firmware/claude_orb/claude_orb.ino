@@ -3,7 +3,7 @@
    Home: 2x3 app icon grid (Claude / Clock / Weather / Timer / Stopwatch / Setup)
    + status bar (time, battery pill). Tap an icon to open an app; BOOT (GPIO0)
    = home button; hold BOOT 3s = WiFi setup portal.
-   - Claude:    usage dashboard, 2 pages (swipe to flip)
+   - Claude:    usage dashboard, 3 pages (swipe: overview / details / 7-day trend)
    - Clock:     digital clock w/ seconds; bezel = anti-aliased SESSION usage ring
    - Timer:     pomodoro countdown on the ring (5/10/25/45 min presets,
                 keeps running in background, jumps back when done)
@@ -79,6 +79,9 @@ struct Usage {
   int   wxT = 0, wxC = -1;           // 当前气温/天气码
   int   wxFeels = 0, wxHum = 0, wxWind = 0;
   WxDay days[5]; int nDays = 0;      // 5天预报(Weather App 用)
+  int64_t tok7d[7] = {0};            // 近7天每日 token(下标0=6天前 … 6=今天)
+  int64_t weekTok = 0;               // 近7天总和
+  float cost7dUsd = 0, cost30dUsd = 0;
   uint32_t fetchMs = 0;
 } U;
 uint32_t lastPoll = 0, lastRender = 0;
@@ -140,9 +143,9 @@ void segBar(int x0, int y, int w, float frac, uint16_t on, uint16_t off, int n, 
   for (int i = 0; i < n; i++) gfx->fillRect(x0 + i * (segw + gap), y, segw, h, i < lit ? on : off);
 }
 void pageDots(int p) {
-  for (int i = 0; i < 2; i++) {
-    if (i == p) gfx->fillCircle(CX - 8 + i * 16, 326, 3, C_ORANGE);
-    else        gfx->drawCircle(CX - 8 + i * 16, 326, 3, C_DIM);
+  for (int i = 0; i < 3; i++) {                    // Claude app 现为 3 页
+    if (i == p) gfx->fillCircle(CX - 16 + i * 16, 326, 3, C_ORANGE);
+    else        gfx->drawCircle(CX - 16 + i * 16, 326, 3, C_DIM);
   }
 }
 
@@ -624,6 +627,64 @@ void renderSettings() {
   txt("hold BOOT 3s = WiFi setup", CX - txtW("hold BOOT 3s = WiFi setup", 1) / 2, 286, 1, C_ORANGE);
 }
 
+// ---------------------- Page 3：近 7 天 token 趋势(柱状 + 趋势线) ----------------------
+void renderPage3() {
+  gfx->fillScreen(C_BG);
+  int gw = CLAUDE_LOGO_W + 8 + txtW("7-DAY", 3);
+  int tx = CX - gw / 2;
+  logoAt(tx, 30);
+  txt("7-DAY", tx + CLAUDE_LOGO_W + 8, 42, 3, C_WHITE);
+
+  if (U.weekTok <= 0) {
+    txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 175, 3, C_RED);
+    pageDots(page); return;
+  }
+
+  const int n = 7;
+  const int x0 = 54, chW = 252;                    // 图表横向范围(圆内安全区)
+  const int baseY = 196, maxH = 100;               // 基线 + 最大柱高
+  const int slot = chW / n;                        // 每天 36px
+  const int bw = 22;                               // 柱宽
+  int64_t mx = 1;
+  for (int i = 0; i < n; i++) if (U.tok7d[i] > mx) mx = U.tok7d[i];
+
+  struct tm t; bool ok = getLocalTime(&t, 20);     // 推算每根柱的星期
+  int topX[n], topY[n];
+  for (int i = 0; i < n; i++) {
+    int cx = x0 + i * slot + slot / 2;
+    int bx = cx - bw / 2;
+    int h = (int)((float)U.tok7d[i] / mx * maxH);
+    if (h < 2 && U.tok7d[i] > 0) h = 2;
+    bool today = (i == n - 1);
+    if (h <= 0) gfx->fillRect(bx, baseY - 2, bw, 2, C_BAROFF);
+    else        gfx->fillRect(bx, baseY - h, bw, h, today ? C_GLOW : C_ORANGE);
+    topX[i] = cx; topY[i] = (h <= 0 ? baseY - 2 : baseY - h);
+    if (ok) {
+      int wd = (t.tm_wday - (n - 1 - i)) % 7; if (wd < 0) wd += 7;
+      txt(WD3[wd], cx - txtW(WD3[wd], 1) / 2, baseY + 6, 1, today ? C_GLOW : C_DIM);
+    }
+  }
+  gfx->drawFastHLine(x0, baseY, chW, C_BAROFF);     // 基线
+  for (int i = 1; i < n; i++)                        // 趋势线:连各柱顶
+    gfx->drawLine(topX[i - 1], topY[i - 1], topX[i], topY[i], C_WHITE);
+  for (int i = 0; i < n; i++)                        // 顶点小点(今天高亮)
+    gfx->fillCircle(topX[i], topY[i], 2, i == n - 1 ? C_GLOW : C_WHITE);
+
+  gfx->drawFastHLine(44, 224, 272, C_BAROFF);
+  txt("7D TOTAL", 44, 234, 2, C_DIM);
+  String tt = humanTok(U.weekTok);
+  txt(tt, 312 - txtW(tt, 2), 234, 2, C_GLOW);
+  char cb[16]; snprintf(cb, sizeof(cb), "$%.2f", U.cost7dUsd);
+  txt("7D COST", 44, 262, 2, C_DIM);
+  txt(String(cb), 312 - txtW(String(cb), 2), 262, 2, C_ORANGE);
+
+  uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
+  gfx->fillCircle(60, 301, 5, dot);
+  txt("LIVE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
+  drawBatteryPill(272, 298);
+  pageDots(page);
+}
+
 // 内容签名(分钟级；不含秒级 idle)——只在内容变化时才刷出，消除周期性闪屏
 String lastSig = "";
 String computeSig() {
@@ -655,6 +716,8 @@ String computeSig() {
   if (page == 1)
     s += pctStr(U.sonnetPct) + pctStr(U.opusPct) + (U.extraEnabled ? "E" : "e")
        + humanTok(U.tokToday) + String(U.activeProj) + String(U.activeMsgs);
+  if (page == 2)
+    s += humanTok(U.weekTok) + String((int)U.cost7dUsd);
   return s;
 }
 void render() {
@@ -668,7 +731,8 @@ void render() {
   else if (app == 5) renderStopwatch();
   else if (app == 6) renderSettings();
   else if (page == 0) renderPage1();
-  else                renderPage2();
+  else if (page == 1) renderPage2();
+  else                renderPage3();
   canvas->flush();
 }
 
@@ -711,6 +775,11 @@ bool poll() {
       U.nDays++;
     }
   }
+  JsonArray t7 = doc["tok_7d"];                    // 近7天每日 token(已由 proxy 提供)
+  if (!t7.isNull()) { int i = 0; for (JsonVariant v : t7) { if (i >= 7) break; U.tok7d[i++] = v.as<int64_t>(); } }
+  U.weekTok    = doc["week_tok"].as<int64_t>();
+  U.cost7dUsd  = doc["cost_7d_usd"] | 0.0;
+  U.cost30dUsd = doc["cost_30d_usd"] | 0.0;
   U.fetchMs = millis();
   return true;
 }
@@ -810,7 +879,7 @@ void loop() {
       for (int i = 0; i < 6; i++)
         if (abs(tapX - ICONS[i].cx) <= 36 && abs(tapY - ICONS[i].cy) <= 42) { app = i + 1; page = 0; break; }
     } else if (app == 1 && gst == 2) {
-      page = (page + 1) % 2;
+      page = (page + 1) % 3;
     } else if (app == 4) {                       // Timer:点上半切预设(停时),点下半开始/暂停,滑动重置
       if (gst == 2 || (gst == 1 && tmrDone)) {
         tmrRun = false; tmrDone = false; tmrLeftMs = TMR_PRESETS[tmrPre] * 60000UL;
