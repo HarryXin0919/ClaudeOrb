@@ -159,7 +159,7 @@ void lbl(const char* en, const char* zh, int x, int yTop, uint8_t size, uint16_t
     int w = zhW(zh, size <= 1);
     int cx = align == 1 ? x - w / 2 : align == 2 ? x - w : x;
     gfx->setFont(size <= 1 ? FONT_ZH_S : FONT_ZH); gfx->setUTF8Print(true);
-    gfx->setTextColor(color); gfx->setCursor(cx, yTop + (size <= 1 ? 9 : 14));   // u8g2 以基线定位,+14 把顶对到 yTop
+    gfx->setTextColor(color); gfx->setCursor(cx, yTop + (size <= 1 ? 11 : 14));   // u8g2 以基线定位,+14 把顶对到 yTop
     gfx->print(zh);
     gfx->setUTF8Print(false); gfx->setFont((const GFXfont*)nullptr);
   } else {
@@ -173,7 +173,7 @@ void utext(const String& s, int x, int yTop, uint16_t color, int align = 0, uint
   int w = zhW(s.c_str(), size <= 1);
   int cx = align == 1 ? x - w / 2 : align == 2 ? x - w : x;
   gfx->setFont(size <= 1 ? FONT_ZH_S : FONT_ZH); gfx->setUTF8Print(true);
-  gfx->setTextColor(color); gfx->setCursor(cx, yTop + (size <= 1 ? 9 : 14));
+  gfx->setTextColor(color); gfx->setCursor(cx, yTop + (size <= 1 ? 11 : 14));
   gfx->print(s);
   gfx->setUTF8Print(false); gfx->setFont((const GFXfont*)nullptr);
 }
