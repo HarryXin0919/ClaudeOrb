@@ -140,25 +140,26 @@ void logoAt(int x, int y) { gfx->draw16bitRGBBitmap(x, y, (uint16_t*)claude_logo
 
 // ---------------------- 国际化(中文走 Arduino_GFX 内置 u8g2 字体) ----------------------
 const uint8_t* FONT_ZH = u8g2_font_unifont_h_chinese; // Arduino_GFX 自带 CJK 字库(16px),其解码器专配
+const uint8_t* FONT_ZH_S = u8g2_font_cubic11_h_cjk;  // CJK ~12px for size-1 small text, so small labels/hints aren't oversized
 const char* tr(const char* en, const char* zh) { return g_lang ? zh : en; }
-int zhW(const char* s) {                             // 估算 wqy16 像素宽:CJK=16,ASCII=8
-  int w = 0;
+int zhW(const char* s, bool small = false) {                             // 估算 wqy16 像素宽:CJK=16,ASCII=8
+  int cjk = small ? 12 : 16, asc = small ? 6 : 8, w = 0;
   for (const uint8_t* p = (const uint8_t*)s; *p; ) {
-    if (*p < 0x80)                { w += 8;  p += 1; }
-    else if ((*p & 0xE0) == 0xC0) { w += 16; p += 2; }
-    else if ((*p & 0xF0) == 0xE0) { w += 16; p += 3; }
-    else                          { w += 16; p += 1; }
+    if (*p < 0x80)                { w += asc;  p += 1; }
+    else if ((*p & 0xE0) == 0xC0) { w += cjk; p += 2; }
+    else if ((*p & 0xF0) == 0xE0) { w += cjk; p += 3; }
+    else                          { w += cjk; p += 1; }
   }
   return w;
 }
-int lblW(const char* en, const char* zh, uint8_t size) { return g_lang ? zhW(zh) : txtW(en, size); }
+int lblW(const char* en, const char* zh, uint8_t size) { return g_lang ? zhW(zh, size <= 1) : txtW(en, size); }
 // 画标签:EN 用可缩放内置字体,中文用 wqy16(16px)。align 0=左(x=左) 1=居中(x=中心) 2=右(x=右缘);yTop=顶部
 void lbl(const char* en, const char* zh, int x, int yTop, uint8_t size, uint16_t color, int align = 0) {
   if (g_lang) {
-    int w = zhW(zh);
+    int w = zhW(zh, size <= 1);
     int cx = align == 1 ? x - w / 2 : align == 2 ? x - w : x;
-    gfx->setFont(FONT_ZH); gfx->setUTF8Print(true);
-    gfx->setTextColor(color); gfx->setCursor(cx, yTop + 14);   // u8g2 以基线定位,+14 把顶对到 yTop
+    gfx->setFont(size <= 1 ? FONT_ZH_S : FONT_ZH); gfx->setUTF8Print(true);
+    gfx->setTextColor(color); gfx->setCursor(cx, yTop + (size <= 1 ? 9 : 14));   // u8g2 以基线定位,+14 把顶对到 yTop
     gfx->print(zh);
     gfx->setUTF8Print(false); gfx->setFont((const GFXfont*)nullptr);
   } else {
@@ -168,11 +169,11 @@ void lbl(const char* en, const char* zh, int x, int yTop, uint8_t size, uint16_t
   }
 }
 // 画可能含中文的动态串(始终用 wqy16,ASCII 也覆盖)。align 同 lbl;yTop=顶部
-void utext(const String& s, int x, int yTop, uint16_t color, int align = 0) {
-  int w = zhW(s.c_str());
+void utext(const String& s, int x, int yTop, uint16_t color, int align = 0, uint8_t size = 2) {
+  int w = zhW(s.c_str(), size <= 1);
   int cx = align == 1 ? x - w / 2 : align == 2 ? x - w : x;
-  gfx->setFont(FONT_ZH); gfx->setUTF8Print(true);
-  gfx->setTextColor(color); gfx->setCursor(cx, yTop + 14);
+  gfx->setFont(size <= 1 ? FONT_ZH_S : FONT_ZH); gfx->setUTF8Print(true);
+  gfx->setTextColor(color); gfx->setCursor(cx, yTop + (size <= 1 ? 9 : 14));
   gfx->print(s);
   gfx->setUTF8Print(false); gfx->setFont((const GFXfont*)nullptr);
 }
@@ -702,7 +703,7 @@ void renderWeather() {
   lbl(wxText(U.wxC), wxTextZH(U.wxC), CX, 122, 2, C_GLOW, 1);
   if (g_lang) {                                  // 体感/湿度/风
     String m = "体感" + String(tDisp(U.wxFeels)) + "  湿度" + String(U.wxHum) + "%  风" + String(U.wxWind) + "km/h";
-    utext(m, CX, 148, C_DIM, 1);
+    utext(m, CX, 148, C_DIM, 1, 1);
   } else {
     char m[48]; snprintf(m, sizeof(m), "feels %d  hum %d%%  wind %dkm/h", tDisp(U.wxFeels), U.wxHum, U.wxWind);
     txt(m, CX - txtW(m, 1) / 2, 148, 1, C_DIM);
@@ -733,7 +734,7 @@ void renderTimer() {
     txt(b, CX - txtW(b, 7) / 2, 144, 7, C_WHITE);
     if (g_lang) { String p = String(TMR_PRESETS[tmrPre]) + " 分"; utext(p, CX, 222, C_ORANGE, 1); }
     else { char p[10]; snprintf(p, sizeof(p), "%d min", TMR_PRESETS[tmrPre]); txt(p, CX - txtW(p, 2) / 2, 222, 2, C_ORANGE); }
-    if (g_lang) utext(tmrRun ? "点击暂停" : "点击开始 · 滑动重置", CX, 252, C_DIM, 1);
+    if (g_lang) utext(tmrRun ? "点击暂停" : "点击开始 · 滑动重置", CX, 252, C_DIM, 1, 1);
     else { const char* hint = tmrRun ? "tap to pause" : "tap: start   top: preset   swipe: reset";
            txt(hint, CX - txtW(hint, 1) / 2, 252, 1, C_DIM); }
   }
@@ -749,7 +750,7 @@ void renderStopwatch() {
   txt(b, CX - txtW(b, 7) / 2, 144, 7, C_WHITE);
   char d[4]; snprintf(d, sizeof(d), ".%lu", (unsigned long)((ms / 100) % 10));
   txt(d, CX + txtW(b, 7) / 2 + 4, 184, 2, C_BLUE);
-  if (g_lang) utext(stwRun ? "点击停止 · 滑动清零" : "点击开始 · 滑动清零", CX, 252, C_DIM, 1);
+  if (g_lang) utext(stwRun ? "点击停止 · 滑动清零" : "点击开始 · 滑动清零", CX, 252, C_DIM, 1, 1);
   else { const char* hint = stwRun ? "tap: stop   swipe: reset" : "tap: start   swipe: reset";
          txt(hint, CX - txtW(hint, 1) / 2, 252, 1, C_DIM); }
 }
@@ -829,7 +830,7 @@ void renderPage3() {
     if (ok) {
       int wd = (t.tm_wday - (n - 1 - i)) % 7; if (wd < 0) wd += 7;
       uint16_t wc = today ? C_GLOW : C_DIM;
-      if (g_lang) utext(WD3Z[wd], cx, baseY + 6, wc, 1);
+      if (g_lang) utext(WD3Z[wd], cx, baseY + 6, wc, 1, 1);
       else        txt(WD3[wd], cx - txtW(WD3[wd], 1) / 2, baseY + 6, 1, wc);
     }
   }
