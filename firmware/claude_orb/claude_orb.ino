@@ -19,7 +19,9 @@
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <time.h>
-#include <Arduino_GFX_Library.h>
+#include <Preferences.h>
+#include <U8g2lib.h>                 // 必须在 Arduino_GFX 之前:这是开启其 u8g2 支持+自带 CJK 字库的开关
+#include <Arduino_GFX_Library.h>     // 自带 u8g2 中文字库(src/font/),其解码器只认这套自带的,别用外部 U8g2 的字库符号
 #include "st77916_ws_init.h"
 #include "claude_logo.h"
 
@@ -67,10 +69,33 @@ const uint16_t C_BLUE   = RGB565(92, 156, 255);
 
 const int CX = 180, CY = 180;
 
+// ---------------------- 用户设置(NVS:语言/亮度/时制/温标) ----------------------
+Preferences cfg;
+int  g_lang   = 0;       // 0=English 1=中文
+int  g_bright = 4;       // 亮度档 0..4
+bool g_clk24  = true;    // true=24小时制 false=12小时制
+bool g_tempF  = false;   // true=华氏 °F  false=摄氏 °C
+void blWrite(int duty) { ledcWrite(BL_PIN, duty); }                       // ESP32 core 3.x
+void applyBright() { blWrite(map(constrain(g_bright, 0, 4), 0, 4, 35, 255)); }  // 最低档也不全黑
+void loadCfg() {
+  cfg.begin("orbcfg", true);
+  g_lang   = cfg.getInt ("lang", 0);
+  g_bright = cfg.getInt ("bri",  4);
+  g_clk24  = cfg.getBool("c24",  true);
+  g_tempF  = cfg.getBool("tf",   false);
+  cfg.end();
+}
+void saveCfg() {
+  cfg.begin("orbcfg", false);
+  cfg.putInt ("lang", g_lang);  cfg.putInt ("bri", g_bright);
+  cfg.putBool("c24",  g_clk24); cfg.putBool("tf",  g_tempF);
+  cfg.end();
+}
+
 // ---------------------- 数据 ----------------------
 struct WxDay { char d[6]; int c, hi, lo; };
 struct Usage {
-  bool ok = false, stale = false, extraEnabled = false;
+  bool ok = false, stale = false, extraEnabled = false, haveLimits = false;
   float sessionPct = 0, weekPct = 0, sonnetPct = 0, opusPct = -1, extraPct = -1;
   long  sessionReset = 0, weekReset = 0, activeIdle = -1;
   int64_t tokToday = 0, activeTok = 0;
@@ -82,7 +107,7 @@ struct Usage {
   int64_t tok7d[7] = {0};            // 近7天每日 token(下标0=6天前 … 6=今天)
   int64_t weekTok = 0;               // 近7天总和
   float cost7dUsd = 0, cost30dUsd = 0;
-  uint32_t fetchMs = 0;
+  uint32_t fetchMs = 0, liveMs = 0;
 } U;
 uint32_t lastPoll = 0, lastRender = 0;
 int app = 0;                          // 0=主屏 1=Claude 2=Clock 3=Weather 4=Timer 5=Stopwatch 6=Setup;BOOT=Home键
@@ -101,6 +126,9 @@ bool timeOK = false;
 int lastBtn = HIGH; uint32_t btnDownMs = 0;
 volatile uint32_t lastOnline = 0;     // 后台拉取任务写,主循环读
 volatile int pollFails = 0;
+// 链路状态(数据从左流到右:WiFi → Proxy → Live 上游)。后台拉取任务写,渲染读
+enum { LINK_NO_WIFI = 0, LINK_NO_PROXY = 1, LINK_NO_UPSTREAM = 2, LINK_LIVE = 3 };
+volatile int g_link = LINK_NO_WIFI;
 
 // ---------------------- 工具 ----------------------
 void txt(const String& s, int x, int y, uint8_t size, uint16_t color) {
@@ -109,6 +137,51 @@ void txt(const String& s, int x, int y, uint8_t size, uint16_t color) {
 }
 int txtW(const String& s, uint8_t size) { return s.length() * 6 * size; }
 void logoAt(int x, int y) { gfx->draw16bitRGBBitmap(x, y, (uint16_t*)claude_logo, CLAUDE_LOGO_W, CLAUDE_LOGO_H); }
+
+// ---------------------- 国际化(中文走 Arduino_GFX 内置 u8g2 字体) ----------------------
+const uint8_t* FONT_ZH = u8g2_font_unifont_h_chinese; // Arduino_GFX 自带 CJK 字库(16px),其解码器专配
+const char* tr(const char* en, const char* zh) { return g_lang ? zh : en; }
+int zhW(const char* s) {                             // 估算 wqy16 像素宽:CJK=16,ASCII=8
+  int w = 0;
+  for (const uint8_t* p = (const uint8_t*)s; *p; ) {
+    if (*p < 0x80)                { w += 8;  p += 1; }
+    else if ((*p & 0xE0) == 0xC0) { w += 16; p += 2; }
+    else if ((*p & 0xF0) == 0xE0) { w += 16; p += 3; }
+    else                          { w += 16; p += 1; }
+  }
+  return w;
+}
+int lblW(const char* en, const char* zh, uint8_t size) { return g_lang ? zhW(zh) : txtW(en, size); }
+// 画标签:EN 用可缩放内置字体,中文用 wqy16(16px)。align 0=左(x=左) 1=居中(x=中心) 2=右(x=右缘);yTop=顶部
+void lbl(const char* en, const char* zh, int x, int yTop, uint8_t size, uint16_t color, int align = 0) {
+  if (g_lang) {
+    int w = zhW(zh);
+    int cx = align == 1 ? x - w / 2 : align == 2 ? x - w : x;
+    gfx->setFont(FONT_ZH); gfx->setUTF8Print(true);
+    gfx->setTextColor(color); gfx->setCursor(cx, yTop + 14);   // u8g2 以基线定位,+14 把顶对到 yTop
+    gfx->print(zh);
+    gfx->setUTF8Print(false); gfx->setFont((const GFXfont*)nullptr);
+  } else {
+    int w = txtW(en, size);
+    int lx = align == 1 ? x - w / 2 : align == 2 ? x - w : x;
+    txt(en, lx, yTop, size, color);
+  }
+}
+// 画可能含中文的动态串(始终用 wqy16,ASCII 也覆盖)。align 同 lbl;yTop=顶部
+void utext(const String& s, int x, int yTop, uint16_t color, int align = 0) {
+  int w = zhW(s.c_str());
+  int cx = align == 1 ? x - w / 2 : align == 2 ? x - w : x;
+  gfx->setFont(FONT_ZH); gfx->setUTF8Print(true);
+  gfx->setTextColor(color); gfx->setCursor(cx, yTop + 14);
+  gfx->print(s);
+  gfx->setUTF8Print(false); gfx->setFont((const GFXfont*)nullptr);
+}
+int  tDisp(int c) { return g_tempF ? (int)lroundf(c * 9.0f / 5.0f + 32) : c; }   // 温度显示值(°C/°F)
+char tUnit()      { return g_tempF ? 'F' : 'C'; }
+void fmtHM(char* b, size_t n, int h, int m) {       // 按 12/24 时制格式化 HH:MM
+  if (g_clk24) snprintf(b, n, "%02d:%02d", h, m);
+  else { int h12 = h % 12; if (h12 == 0) h12 = 12; snprintf(b, n, "%d:%02d", h12, m); }
+}
 
 String humanTok(int64_t t) {
   char b[16];
@@ -147,6 +220,50 @@ void pageDots(int p) {
     if (i == p) gfx->fillCircle(CX - 16 + i * 16, 326, 3, C_ORANGE);
     else        gfx->drawCircle(CX - 16 + i * 16, 326, 3, C_DIM);
   }
+}
+
+// ---------------------- 链路状态:WiFi → Proxy → Live(上游) ----------------------
+bool limitsStale() { return g_link != LINK_LIVE; }        // 限额%靠上游,非 LIVE 即过期
+bool dataStale()   { return g_link <  LINK_NO_UPSTREAM; } // 代理都不可达 → 本地数据也冻结
+uint16_t pctColorS(float p, bool stale) { return stale ? C_DIM : pctColor(p); }
+const char* lwEN() {
+  switch (g_link) {
+    case LINK_LIVE:        return "LIVE";
+    case LINK_NO_UPSTREAM: return "NO API";
+    case LINK_NO_PROXY:    return "NO PROXY";
+    default:               return "NO WIFI";
+  }
+}
+const char* lwZH() {
+  switch (g_link) {
+    case LINK_LIVE:        return "实时";
+    case LINK_NO_UPSTREAM: return "无上游";
+    case LINK_NO_PROXY:    return "无代理";
+    default:               return "无网络";
+  }
+}
+uint16_t linkColor() { return g_link == LINK_LIVE ? C_GREEN : (g_link == LINK_NO_UPSTREAM ? C_AMBER : C_RED); }
+// 三点链路灯:WiFi → Proxy → Live(数据从左流到右),断了一眼看出卡在哪一环
+void drawLinkDots(int x, int y) {
+  bool w = g_link >= LINK_NO_PROXY;      // WiFi 通
+  bool p = g_link >= LINK_NO_UPSTREAM;   // 代理可达
+  bool l = g_link == LINK_LIVE;          // 上游实时
+  gfx->fillCircle(x,      y, 3, w ? C_GREEN : C_RED);
+  gfx->fillCircle(x + 12, y, 3, p ? C_GREEN : (w ? C_RED : C_BAROFF));
+  gfx->fillCircle(x + 24, y, 3, l ? C_GREEN : (p ? C_AMBER : C_BAROFF));
+}
+// 数据从未到位时的状态页(三页共用):大字指明卡在哪一环 + 三点灯 + 提示
+void renderLinkStatusScreen() {
+  lbl(lwEN(), lwZH(), CX, 150, 3, linkColor(), 1);
+  drawLinkDots(CX - 12, 188);
+  const char* hEN = g_link == LINK_NO_WIFI  ? "hold BOOT 3s for WiFi setup"
+                  : g_link == LINK_NO_PROXY ? "proxy unreachable"
+                  :                           "waiting for data...";
+  const char* hZH = g_link == LINK_NO_WIFI  ? "长按 BOOT 3 秒配网"
+                  : g_link == LINK_NO_PROXY ? "代理不可达"
+                  :                           "正在等待数据...";
+  lbl(hEN, hZH, CX, 214, 2, C_DIM, 1);
+  pageDots(page);
 }
 
 // 计算实时倒计时
@@ -254,9 +371,9 @@ int checkGesture() {
 }
 
 // ---------------------- Page 1：概览 ----------------------
-void gauge(int y, const String& label, float pct, long resetS) {
-  uint16_t pc = pctColor(pct);
-  txt(label, 52, y, 2, C_WHITE);
+void gauge(int y, const char* en, const char* zh, float pct, long resetS) {
+  uint16_t pc = pctColorS(pct, limitsStale());   // 过期(上游断)时置灰
+  lbl(en, zh, 52, y, 2, C_WHITE, 0);
   String ps = pctStr(pct);
   txt(ps, 308 - txtW(ps, 4), y - 8, 4, pc);
   segBar(52, y + 34, 256, pct / 100.0, pc, C_BAROFF, 22, 14);
@@ -272,62 +389,62 @@ void renderPage1() {
   txt("CLAUDE", sx0 + CLAUDE_LOGO_W + 8, 38, 3, C_WHITE);
   if (plan.length()) txt(plan, CX - txtW(plan, 2) / 2, 76, 2, C_ORANGE);
 
-  if (!U.ok && U.sessionPct == 0 && U.weekPct == 0) {
-    txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 175, 3, C_RED);
-    txt("check proxy / login", CX - txtW("check proxy / login", 2) / 2, 210, 2, C_DIM);
-    pageDots(page); return;
+  if (!U.haveLimits) {                          // 从未拿到限额 → 状态页(指明卡在哪一环)
+    renderLinkStatusScreen(); return;
   }
-  gauge(124, "SESSION", U.sessionPct, liveReset(U.sessionReset));
-  gauge(212, "WEEKLY",  U.weekPct,    liveReset(U.weekReset));
+  gauge(124, "SESSION", "会话", U.sessionPct, liveReset(U.sessionReset));
+  gauge(212, "WEEKLY",  "每周", U.weekPct,    liveReset(U.weekReset));
 
-  uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
-  gfx->fillCircle(60, 301, 5, dot);
-  txt("CLAUDE CODE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
-  drawBatteryPill(272, 298);                    // 底栏:左状态右电量
+  drawLinkDots(56, 301);                        // 底栏:三段链路灯 + 状态词 + 电量
+  lbl(lwEN(), lwZH(), 88, 295, 2, linkColor(), 0);
+  drawBatteryPill(272, 298);
   pageDots(page);
 }
 
 // ---------------------- Page 2：细节 ----------------------
-void limRow(int y, const String& k, float pct, long resetS) {
-  txt(k, 44, y, 2, C_DIM);
-  txt(pctStr(pct), 150, y, 2, pct < 0 ? C_DIM : pctColor(pct));
+void limRow(int y, const char* en, const char* zh, float pct, long resetS) {
+  lbl(en, zh, 44, y, 2, C_DIM, 0);
+  txt(pctStr(pct), 150, y, 2, pct < 0 ? C_DIM : pctColorS(pct, limitsStale()));
   if (resetS >= 0) { String r = fmtReset(resetS); txt(r, 312 - txtW(r, 2), y, 2, C_DIM); }
 }
 void renderPage2() {
   gfx->fillScreen(C_BG);
-  int gw = CLAUDE_LOGO_W + 8 + txtW("DETAILS", 3);   // 居中，避免 logo 被圆角裁掉
+  int gw = CLAUDE_LOGO_W + 8 + lblW("DETAILS", "详情", 3);   // 居中，避免 logo 被圆角裁掉
   int tx = CX - gw / 2;
   logoAt(tx, 34);
-  txt("DETAILS", tx + CLAUDE_LOGO_W + 8, 46, 3, C_WHITE);
+  lbl("DETAILS", "详情", tx + CLAUDE_LOGO_W + 8, 46, 3, C_WHITE, 0);
 
-  if (!U.ok && U.tokToday == 0) {
-    txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 175, 3, C_RED);
-    pageDots(page); return;
+  if (!U.haveLimits && U.tokToday == 0) {       // 啥都没有 → 状态页
+    renderLinkStatusScreen(); return;
   }
+  uint16_t locC = dataStale() ? C_DIM : C_GLOW; // 本地数据(代理可达即新鲜)
 
-  limRow(92,  "5H",     U.sessionPct, liveReset(U.sessionReset));
-  limRow(120, "WEEK",   U.weekPct,    liveReset(U.weekReset));
-  // SONNET + OPUS 同行
-  txt("SONNET", 44, 148, 2, C_DIM);  txt(pctStr(U.sonnetPct), 150, 148, 2, U.sonnetPct < 0 ? C_DIM : pctColor(U.sonnetPct));
-  txt("OPUS",   210, 148, 2, C_DIM); txt(pctStr(U.opusPct),   282, 148, 2, U.opusPct < 0 ? C_DIM : pctColor(U.opusPct));
-  txt("EXTRA",  44, 176, 2, C_DIM);  txt(U.extraEnabled ? (U.extraPct < 0 ? "on" : pctStr(U.extraPct)) : "off", 150, 176, 2, C_DIM);
+  limRow(92,  "5H",   "5时", U.sessionPct, liveReset(U.sessionReset));
+  limRow(120, "WEEK", "每周", U.weekPct,   liveReset(U.weekReset));
+  // SONNET + OPUS 同行(模型名保留英文)
+  txt("SONNET", 44, 148, 2, C_DIM);  txt(pctStr(U.sonnetPct), 150, 148, 2, U.sonnetPct < 0 ? C_DIM : pctColorS(U.sonnetPct, limitsStale()));
+  txt("OPUS",   210, 148, 2, C_DIM); txt(pctStr(U.opusPct),   282, 148, 2, U.opusPct < 0 ? C_DIM : pctColorS(U.opusPct, limitsStale()));
+  lbl("EXTRA", "超额", 44, 176, 2, C_DIM, 0);
+  if (!U.extraEnabled)        lbl("off", "关", 150, 176, 2, C_DIM, 0);
+  else if (U.extraPct < 0)    lbl("on",  "开", 150, 176, 2, C_DIM, 0);
+  else                        txt(pctStr(U.extraPct), 150, 176, 2, C_DIM);
 
   gfx->drawFastHLine(44, 202, 272, C_BAROFF);
 
-  // 今日 token
-  txt("TODAY", 44, 214, 2, C_DIM);
-  txt(humanTok(U.tokToday) + " tok", 312 - txtW(humanTok(U.tokToday) + " tok", 2), 214, 2, C_GLOW);
+  // 今日 token(本地数据)
+  lbl("TODAY", "今日", 44, 214, 2, C_DIM, 0);
+  String tdy = humanTok(U.tokToday) + " tok";
+  txt(tdy, 312 - txtW(tdy, 2), 214, 2, locC);
 
-  // 当前活跃会话
-  txt("ACTIVE", 44, 244, 2, C_DIM);
-  txt(String(U.activeProj), 150, 244, 2, C_WHITE);
+  // 当前活跃会话(本地数据;明细行数字为主,保留英文单位)
+  lbl("ACTIVE", "活跃", 44, 244, 2, C_DIM, 0);
+  txt(String(U.activeProj), 150, 244, 2, dataStale() ? C_DIM : C_WHITE);
   String d = humanTok(U.activeTok) + "  " + String(U.activeMsgs) + " msg  idle " + fmtIdle(U.activeIdle);
   txt(d, CX - txtW(d, 1) / 2, 274, 1, C_DIM);
 
-  uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
-  gfx->fillCircle(60, 301, 5, dot);
-  txt("LIVE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
-  drawBatteryPill(272, 298);                    // 底栏与第1页对齐:左状态右电量
+  drawLinkDots(56, 301);                        // 底栏:三段链路灯 + 状态词 + 电量
+  lbl(lwEN(), lwZH(), 88, 295, 2, linkColor(), 0);
+  drawBatteryPill(272, 298);
   pageDots(page);
 }
 
@@ -348,6 +465,13 @@ const char* wxText(int c) {
     case 0: return "Clear";  case 1: return "P.Cloudy"; case 2: return "Cloudy";
     case 3: return "Fog";    case 4: return "Rain";     case 5: return "Snow";
     default: return "Storm";
+  }
+}
+const char* wxTextZH(int c) {
+  switch (wxType(c)) {
+    case 0: return "晴";   case 1: return "多云"; case 2: return "阴";
+    case 3: return "雾";   case 4: return "雨";   case 5: return "雪";
+    default: return "雷暴";
   }
 }
 void wxCloud(int cx, int cy, int s, uint16_t c) {
@@ -386,6 +510,7 @@ struct AppIcon { int cx, cy; const char* label; };
 const AppIcon ICONS[6] = {
   { 84, 140, "Claude"}, {180, 140, "Clock"},     {276, 140, "Weather"},
   { 84, 252, "Timer"},  {180, 252, "Stopwatch"}, {276, 252, "Setup"}};
+const char* ICONS_ZH[6] = {"Claude", "时钟", "天气", "计时", "秒表", "设置"};
 void drawTile(int cx, int cy) {                  // iOS 风圆角图标底
   gfx->drawRoundRect(cx - 32, cy - 32, 64, 64, 14, C_BAROFF);
   gfx->drawRoundRect(cx - 31, cy - 31, 62, 62, 13, C_BAROFF);
@@ -394,12 +519,12 @@ void renderHome() {
   gfx->fillScreen(C_BG);
   struct tm t;
   if (getLocalTime(&t, 50)) {                    // 中轴状态栏:时间居中,电量胶囊正下
-    char hm[6]; snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
+    char hm[8]; fmtHM(hm, sizeof(hm), t.tm_hour, t.tm_min);
     txt(hm, CX - txtW(hm, 2) / 2, 12, 2, C_WHITE);
   }
   for (int i = 0; i < 6; i++) {
     drawTile(ICONS[i].cx, ICONS[i].cy);
-    txt(ICONS[i].label, ICONS[i].cx - txtW(ICONS[i].label, 1) / 2, ICONS[i].cy + 40, 1, C_DIM);
+    lbl(ICONS[i].label, ICONS_ZH[i], ICONS[i].cx, ICONS[i].cy + 40, 1, C_DIM, 1);
   }
   // Claude 图标:真 logo
   logoAt(ICONS[0].cx - CLAUDE_LOGO_W / 2, ICONS[0].cy - CLAUDE_LOGO_H / 2);
@@ -438,10 +563,12 @@ void renderHome() {
     gfx->fillCircle(cx, cy, 12, C_DIM);
     gfx->fillCircle(cx, cy, 5, C_BG); }
   drawBatteryPill(180, 44);
+  drawLinkDots(CX - 12, 78);                      // 链路灯:WiFi/代理/实时,主屏一眼可见
 }
 
 // ---------------------- Clock App:大数字时钟表盘 ----------------------
 const char* WD3[7]  = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
+const char* WD3Z[7] = {"周日","周一","周二","周三","周四","周五","周六"};
 const char* MO3[12] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
 // ---------- 高级环渲染:逐像素抗锯齿 + 角向渐变 + 头部光帽/投影(直写帧缓冲) ----------
 // 技法对标 TFT_eSPI drawSmoothArc(边缘 AA)与 Apple 活动环(渐变斜率固定、同色底环、头帽投影)
@@ -520,8 +647,8 @@ void drawRingEx(float fillDeg, uint16_t cEnd, int sec, bool allowFill) {
     fbDot(fb, sx, sy, 3.2f, 9, C_WHITE, 0.35f);
   }
 }
-void drawRing(float pct, int sec) {              // Clock 用量环(颜色随用量档位)
-  drawRingEx(constrain(pct, 0.0f, 100.0f) * 3.6f, pctColor(pct), sec, U.ok);
+void drawRing(float pct, int sec) {              // Clock 用量环(颜色随用量档位;过期置灰,保留上次)
+  drawRingEx(constrain(pct, 0.0f, 100.0f) * 3.6f, pctColorS(pct, limitsStale()), sec, U.haveLimits);
 }
 void renderClock() {
   gfx->fillScreen(C_BG);
@@ -529,24 +656,32 @@ void renderClock() {
   drawRing(U.sessionPct, ok ? t.tm_sec : -1);    // 表圈 = SESSION 用量环 + 秒针
   logoAt(CX - CLAUDE_LOGO_W / 2, 46);
 
-  char hm[6] = "--:--", ss[3] = "--";
+  char hm[8] = "--:--", ss[3] = "--";
   if (ok) {
-    snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
+    fmtHM(hm, sizeof(hm), t.tm_hour, t.tm_min);
     snprintf(ss, sizeof(ss), "%02d", t.tm_sec);
   }
   int tw = txtW(hm, 8), sw = txtW(ss, 2);
   int x0 = CX - (tw + 8 + sw) / 2;
   txt(hm, x0, 132, 8, C_WHITE);
   txt(ss, x0 + tw + 8, 180, 2, C_ORANGE);        // 秒,底部对齐
-  if (ok) {
-    char ds[16]; snprintf(ds, sizeof(ds), "%s %s %d", WD3[t.tm_wday], MO3[t.tm_mon], t.tm_mday);
-    txt(ds, CX - txtW(ds, 2) / 2, 218, 2, C_ORANGE);
+  if (ok && !g_clk24) txt(t.tm_hour < 12 ? "AM" : "PM", x0 + tw + 8, 202, 1, C_DIM);
+  if (ok) {                                      // 日期:中文「6月23日 周一」/ 英文「MON JUN 23」
+    if (g_lang) {
+      String ds = String(t.tm_mon + 1) + "月" + String(t.tm_mday) + "日 " + WD3Z[t.tm_wday];
+      utext(ds, CX, 218, C_ORANGE, 1);
+    } else {
+      char ds[16]; snprintf(ds, sizeof(ds), "%s %s %d", WD3[t.tm_wday], MO3[t.tm_mon], t.tm_mday);
+      txt(ds, CX - txtW(ds, 2) / 2, 218, 2, C_ORANGE);
+    }
   }
-  if (U.wxC >= 0) {
-    char ts[8]; snprintf(ts, sizeof(ts), "%d", U.wxT);
+  if (U.wxC >= 0) {                              // 气温 + 度 + 单位(°C/°F)
+    char ts[8]; snprintf(ts, sizeof(ts), "%d", tDisp(U.wxT));
     int w = txtW(ts, 2);
-    txt(ts, CX - (w + 8) / 2, 248, 2, C_DIM);
-    gfx->drawCircle(CX - (w + 8) / 2 + w + 4, 250, 2, C_DIM);
+    int bx = CX - (w + 12) / 2;
+    txt(ts, bx, 248, 2, C_DIM);
+    gfx->drawCircle(bx + w + 3, 250, 2, C_DIM);
+    txt(String(tUnit()), bx + w + 8, 248, 2, C_DIM);
   }
   drawBatteryPill(180, 292);                     // 中轴底部,表盘部件位
 }
@@ -554,24 +689,30 @@ void renderClock() {
 // ---------------------- Weather App:当前 + 5天预报 ----------------------
 void renderWeather() {
   gfx->fillScreen(C_BG);
-  txt("WEATHER", CX - txtW("WEATHER", 2) / 2, 18, 2, C_DIM);
+  lbl("WEATHER", "天气", CX, 18, 2, C_DIM, 1);
   if (U.wxC < 0) {
-    txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 170, 3, C_RED);
+    lbl("NO DATA", "无数据", CX, 170, 3, C_RED, 1);
     return;
   }
   drawWxIcon(105, 84, U.wxC, 16);
-  char ts[8]; snprintf(ts, sizeof(ts), "%d", U.wxT);
+  char ts[8]; snprintf(ts, sizeof(ts), "%d", tDisp(U.wxT));
   txt(ts, 150, 56, 7, C_WHITE);
   gfx->drawCircle(150 + txtW(ts, 7) + 8, 62, 4, C_WHITE);
-  txt(wxText(U.wxC), CX - txtW(wxText(U.wxC), 2) / 2, 122, 2, C_GLOW);
-  char m[44]; snprintf(m, sizeof(m), "feels %d  hum %d%%  wind %dkm/h", U.wxFeels, U.wxHum, U.wxWind);
-  txt(m, CX - txtW(m, 1) / 2, 148, 1, C_DIM);
+  txt(String(tUnit()), 150 + txtW(ts, 7) + 16, 64, 3, C_WHITE);
+  lbl(wxText(U.wxC), wxTextZH(U.wxC), CX, 122, 2, C_GLOW, 1);
+  if (g_lang) {                                  // 体感/湿度/风
+    String m = "体感" + String(tDisp(U.wxFeels)) + "  湿度" + String(U.wxHum) + "%  风" + String(U.wxWind) + "km/h";
+    utext(m, CX, 148, C_DIM, 1);
+  } else {
+    char m[48]; snprintf(m, sizeof(m), "feels %d  hum %d%%  wind %dkm/h", tDisp(U.wxFeels), U.wxHum, U.wxWind);
+    txt(m, CX - txtW(m, 1) / 2, 148, 1, C_DIM);
+  }
   gfx->drawFastHLine(60, 164, 240, C_BAROFF);
   for (int i = 0; i < U.nDays && i < 5; i++) {
     int y = 178 + i * 26;
-    txt(U.days[i].d, 70, y, 2, C_DIM);
+    txt(U.days[i].d, 70, y, 2, C_DIM);           // 预报日期为服务端字符串,保持原样
     drawWxIcon(165, y + 6, U.days[i].c, 8);
-    char hl[16]; snprintf(hl, sizeof(hl), "%d / %d", U.days[i].hi, U.days[i].lo);
+    char hl[16]; snprintf(hl, sizeof(hl), "%d / %d", tDisp(U.days[i].hi), tDisp(U.days[i].lo));
     txt(hl, 290 - txtW(hl, 2), y, 2, C_WHITE);
   }
 }
@@ -582,18 +723,19 @@ void renderTimer() {
   long left = tmrLeft(); if (left < 0) left = 0;
   float frac = (float)left / (TMR_PRESETS[tmrPre] * 60000.0f);
   drawRingEx(frac * 360, C_ORANGE, -1, left > 0);
-  txt("TIMER", CX - txtW("TIMER", 2) / 2, 64, 2, C_DIM);
+  lbl("TIMER", "计时", CX, 64, 2, C_DIM, 1);
   if (tmrDone) {
     bool on = (millis() / 400) & 1;
-    txt("TIME'S UP", CX - txtW("TIME'S UP", 4) / 2, 158, 4, on ? C_RED : C_DIM);
-    txt("tap to reset", CX - txtW("tap to reset", 1) / 2, 220, 1, C_DIM);
+    lbl("TIME'S UP", "时间到", CX, 158, 4, on ? C_RED : C_DIM, 1);
+    lbl("tap to reset", "点击重置", CX, 220, 1, C_DIM, 1);
   } else {
     char b[8]; snprintf(b, sizeof(b), "%02ld:%02ld", left / 60000, (left / 1000) % 60);
     txt(b, CX - txtW(b, 7) / 2, 144, 7, C_WHITE);
-    char p[10]; snprintf(p, sizeof(p), "%d min", TMR_PRESETS[tmrPre]);
-    txt(p, CX - txtW(p, 2) / 2, 222, 2, C_ORANGE);
-    const char* hint = tmrRun ? "tap to pause" : "tap: start   top: preset   swipe: reset";
-    txt(hint, CX - txtW(hint, 1) / 2, 252, 1, C_DIM);
+    if (g_lang) { String p = String(TMR_PRESETS[tmrPre]) + " 分"; utext(p, CX, 222, C_ORANGE, 1); }
+    else { char p[10]; snprintf(p, sizeof(p), "%d min", TMR_PRESETS[tmrPre]); txt(p, CX - txtW(p, 2) / 2, 222, 2, C_ORANGE); }
+    if (g_lang) utext(tmrRun ? "点击暂停" : "点击开始 · 滑动重置", CX, 252, C_DIM, 1);
+    else { const char* hint = tmrRun ? "tap to pause" : "tap: start   top: preset   swipe: reset";
+           txt(hint, CX - txtW(hint, 1) / 2, 252, 1, C_DIM); }
   }
 }
 
@@ -602,42 +744,67 @@ void renderStopwatch() {
   gfx->fillScreen(C_BG);
   uint32_t ms = stwNow();
   drawRingEx((ms % 60000) * 360.0f / 60000.0f, C_BLUE, -1, ms > 0);
-  txt("STOPWATCH", CX - txtW("STOPWATCH", 2) / 2, 64, 2, C_DIM);
+  lbl("STOPWATCH", "秒表", CX, 64, 2, C_DIM, 1);
   char b[8]; snprintf(b, sizeof(b), "%02lu:%02lu", (unsigned long)(ms / 60000), (unsigned long)((ms / 1000) % 60));
   txt(b, CX - txtW(b, 7) / 2, 144, 7, C_WHITE);
   char d[4]; snprintf(d, sizeof(d), ".%lu", (unsigned long)((ms / 100) % 10));
   txt(d, CX + txtW(b, 7) / 2 + 4, 184, 2, C_BLUE);
-  const char* hint = stwRun ? "tap: stop   swipe: reset" : "tap: start   swipe: reset";
-  txt(hint, CX - txtW(hint, 1) / 2, 252, 1, C_DIM);
+  if (g_lang) utext(stwRun ? "点击停止 · 滑动清零" : "点击开始 · 滑动清零", CX, 252, C_DIM, 1);
+  else { const char* hint = stwRun ? "tap: stop   swipe: reset" : "tap: start   swipe: reset";
+         txt(hint, CX - txtW(hint, 1) / 2, 252, 1, C_DIM); }
 }
 
-// ---------------------- Setup App:网络信息 ----------------------
+// ---------------------- Setup App:交互式设置页(点行切换;含语言/亮度/时制/温标/操作) ----------------------
+const int SET_Y0 = 64, SET_DY = 30, SET_ROWS = 6;   // 行 0..5 的顶 y;触摸命中也用这套
 void renderSettings() {
   gfx->fillScreen(C_BG);
-  txt("SETUP", CX - txtW("SETUP", 2) / 2, 18, 2, C_DIM);
-  logoAt(CX - CLAUDE_LOGO_W / 2, 40);
-  const char* k[6] = {"WIFI", "IP", "RSSI", "PROXY", "PLAN", "BAT"};
-  String v[6] = { netCfg.ssid, WiFi.localIP().toString(), String(WiFi.RSSI()) + " dBm",
-                  netCfg.proxyHost, String(U.plan), String(g_bat) + "%" };
-  for (int i = 0; i < 6; i++) {
-    int y = 96 + i * 28;
-    txt(k[i], 70, y, 2, C_DIM);
-    txt(v[i], 290 - txtW(v[i], 2), y, 2, C_WHITE);
-  }
-  txt("hold BOOT 3s = WiFi setup", CX - txtW("hold BOOT 3s = WiFi setup", 1) / 2, 286, 1, C_ORANGE);
+  lbl("SETTINGS", "设置", CX, 18, 2, C_ORANGE, 1);
+  int y;
+  // 0 语言(值即当前语言名,正好用 lbl 自动选)
+  y = SET_Y0 + 0 * SET_DY;
+  lbl("Language", "语言", 56, y, 2, C_DIM, 0);
+  lbl("English", "中文", 304, y, 2, C_WHITE, 2);
+  // 1 亮度(5 格条)
+  y = SET_Y0 + 1 * SET_DY;
+  lbl("Brightness", "亮度", 56, y, 2, C_DIM, 0);
+  for (int s = 0; s < 5; s++) gfx->fillRect(256 + s * 10, y + 2, 7, 12, s <= g_bright ? C_ORANGE : C_BAROFF);
+  // 2 时制
+  y = SET_Y0 + 2 * SET_DY;
+  lbl("Clock", "时钟", 56, y, 2, C_DIM, 0);
+  txt(g_clk24 ? "24H" : "12H", 304 - txtW(g_clk24 ? "24H" : "12H", 2), y, 2, C_WHITE);
+  // 3 温标
+  y = SET_Y0 + 3 * SET_DY;
+  lbl("Temp", "温度", 56, y, 2, C_DIM, 0);
+  { String u = String(tUnit()); int vx = 304 - txtW(u, 2);
+    gfx->drawCircle(vx - 7, y + 2, 2, C_WHITE); txt(u, vx, y, 2, C_WHITE); }
+  // 4 重新配网(动作)
+  y = SET_Y0 + 4 * SET_DY;
+  lbl("WiFi setup", "重新配网", 56, y, 2, C_BLUE, 0);
+  txt(">", 304 - txtW(">", 2), y, 2, C_BLUE);
+  // 5 重启(动作)
+  y = SET_Y0 + 5 * SET_DY;
+  lbl("Restart", "重启", 56, y, 2, C_BLUE, 0);
+  txt(">", 304 - txtW(">", 2), y, 2, C_BLUE);
+  // 信息区(About):IP / proxy / 链路状态
+  gfx->drawFastHLine(56, SET_Y0 + 6 * SET_DY - 6, 248, C_BAROFF);
+  String ip = "IP " + WiFi.localIP().toString();
+  txt(ip, CX - txtW(ip, 1) / 2, 250, 1, C_DIM);
+  String px = "PROXY " + netCfg.proxyHost;
+  txt(px, CX - txtW(px, 1) / 2, 262, 1, C_DIM);
+  drawLinkDots(CX - 44, 282); lbl(lwEN(), lwZH(), CX - 10, 276, 1, linkColor(), 0);
+  lbl("hold BOOT 3s = WiFi", "长按BOOT 3秒配网", CX, 296, 1, C_ORANGE, 1);
 }
 
 // ---------------------- Page 3：近 7 天 token 趋势(柱状 + 趋势线) ----------------------
 void renderPage3() {
   gfx->fillScreen(C_BG);
-  int gw = CLAUDE_LOGO_W + 8 + txtW("7-DAY", 3);
+  int gw = CLAUDE_LOGO_W + 8 + lblW("7-DAY", "近7天", 3);
   int tx = CX - gw / 2;
   logoAt(tx, 30);
-  txt("7-DAY", tx + CLAUDE_LOGO_W + 8, 42, 3, C_WHITE);
+  lbl("7-DAY", "近7天", tx + CLAUDE_LOGO_W + 8, 42, 3, C_WHITE, 0);
 
   if (U.weekTok <= 0) {
-    txt("NO DATA", CX - txtW("NO DATA", 3) / 2, 175, 3, C_RED);
-    pageDots(page); return;
+    renderLinkStatusScreen(); return;
   }
 
   const int n = 7;
@@ -661,7 +828,9 @@ void renderPage3() {
     topX[i] = cx; topY[i] = (h <= 0 ? baseY - 2 : baseY - h);
     if (ok) {
       int wd = (t.tm_wday - (n - 1 - i)) % 7; if (wd < 0) wd += 7;
-      txt(WD3[wd], cx - txtW(WD3[wd], 1) / 2, baseY + 6, 1, today ? C_GLOW : C_DIM);
+      uint16_t wc = today ? C_GLOW : C_DIM;
+      if (g_lang) utext(WD3Z[wd], cx, baseY + 6, wc, 1);
+      else        txt(WD3[wd], cx - txtW(WD3[wd], 1) / 2, baseY + 6, 1, wc);
     }
   }
   gfx->drawFastHLine(x0, baseY, chW, C_BAROFF);     // 基线
@@ -671,16 +840,15 @@ void renderPage3() {
     gfx->fillCircle(topX[i], topY[i], 2, i == n - 1 ? C_GLOW : C_WHITE);
 
   gfx->drawFastHLine(44, 224, 272, C_BAROFF);
-  txt("7D TOTAL", 44, 234, 2, C_DIM);
+  lbl("7D TOTAL", "7天合计", 44, 234, 2, C_DIM, 0);
   String tt = humanTok(U.weekTok);
-  txt(tt, 312 - txtW(tt, 2), 234, 2, C_GLOW);
+  txt(tt, 312 - txtW(tt, 2), 234, 2, dataStale() ? C_DIM : C_GLOW);
   char cb[16]; snprintf(cb, sizeof(cb), "$%.2f", U.cost7dUsd);
-  txt("7D COST", 44, 262, 2, C_DIM);
-  txt(String(cb), 312 - txtW(String(cb), 2), 262, 2, C_ORANGE);
+  lbl("7D COST", "7天花费", 44, 262, 2, C_DIM, 0);
+  txt(String(cb), 312 - txtW(String(cb), 2), 262, 2, dataStale() ? C_DIM : C_ORANGE);
 
-  uint16_t dot = !U.ok ? C_RED : (U.stale ? C_AMBER : C_GREEN);
-  gfx->fillCircle(60, 301, 5, dot);
-  txt("LIVE", 74, 295, 2, U.stale ? C_AMBER : C_DIM);
+  drawLinkDots(56, 301);                        // 底栏:三段链路灯 + 状态词 + 电量
+  lbl(lwEN(), lwZH(), 88, 295, 2, linkColor(), 0);
   drawBatteryPill(272, 298);
   pageDots(page);
 }
@@ -690,12 +858,13 @@ String lastSig = "";
 String computeSig() {
   struct tm t; bool ok = getLocalTime(&t, 20);
   String mn = String(ok ? t.tm_hour * 60 + t.tm_min : -1);
-  String bt = String(g_bat) + (g_charging ? "C" : "c");
-  if (app == 0)                                  // 主屏:分钟 + 电量 + 天气图标
-    return "L" + mn + bt + String(U.wxC);
-  if (app == 2)                                  // Clock:秒级 + 电量 + 用量环 + 气温
+  String bt = String(g_bat) + (g_charging ? "C" : "c")
+            + String(g_lang) + (g_clk24 ? "H" : "h") + (g_tempF ? "F" : "C") + String(g_bright);
+  if (app == 0)                                  // 主屏:分钟 + 电量 + 天气图标 + 链路灯
+    return "L" + mn + bt + String(U.wxC) + String(g_link);
+  if (app == 2)                                  // Clock:秒级 + 电量 + 用量环 + 气温 + 链路
     return "K" + mn + ":" + String(ok ? t.tm_sec : -1) + bt
-         + (U.ok ? pctStr(U.sessionPct) : "-") + String(U.wxC >= 0 ? U.wxT : -99);
+         + (U.haveLimits ? pctStr(U.sessionPct) : "-") + String(g_link) + String(U.wxC >= 0 ? U.wxT : -99);
   if (app == 3) {                                // Weather:天气字段
     String s = "W" + bt + String(U.wxT) + String(U.wxC) + String(U.wxHum) + String(U.wxWind);
     for (int i = 0; i < U.nDays; i++) s += String(U.days[i].c) + String(U.days[i].hi) + String(U.days[i].lo);
@@ -709,8 +878,8 @@ String computeSig() {
   if (app == 5)                                  // Stopwatch:0.1秒级
     return "P" + String(stwNow() / 100) + (stwRun ? "r" : "p");
   if (app == 6)                                  // Setup:网络状态(RSSI 量化防闪)
-    return "S" + bt + netCfg.ssid + WiFi.localIP().toString() + String(WiFi.RSSI() / 5) + netCfg.proxyHost;
-  String s = "C" + String(page) + (U.ok ? "1" : "0") + (U.stale ? "1" : "0") + bt;
+    return "S" + bt + netCfg.ssid + WiFi.localIP().toString() + String(WiFi.RSSI() / 5) + netCfg.proxyHost + String(g_link);
+  String s = "C" + String(page) + String(g_link) + bt;
   s += pctStr(U.sessionPct) + pctStr(U.weekPct)
      + fmtReset(liveReset(U.sessionReset)) + fmtReset(liveReset(U.weekReset));
   if (page == 1)
@@ -738,30 +907,21 @@ void render() {
 
 // ---------------------- 拉数据 ----------------------
 bool poll() {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.status() != WL_CONNECTED) { g_link = LINK_NO_WIFI; return false; }
   HTTPClient http;
   http.setConnectTimeout(8000); http.setTimeout(8000);
-  if (!http.begin(netProxyUrl())) return false;
+  if (!http.begin(netProxyUrl())) { g_link = LINK_NO_PROXY; return false; }
   int code = http.GET();
-  if (code != 200) { http.end(); U.ok = false; return false; }
+  if (code != 200) { http.end(); g_link = LINK_NO_PROXY; return false; }
   String payload = http.getString(); http.end();
   JsonDocument doc;
-  if (deserializeJson(doc, payload)) { U.ok = false; return false; }
-  U.ok           = doc["ok"] | false;
-  U.stale        = doc["stale"] | false;
-  U.sessionPct   = doc["session_pct"] | 0.0;
-  U.sessionReset = doc["session_reset_s"] | 0L;
-  U.weekPct      = doc["week_pct"] | 0.0;
-  U.weekReset    = doc["week_reset_s"] | 0L;
-  U.sonnetPct    = doc["sonnet_pct"] | -1.0;
-  U.opusPct      = doc["opus_pct"] | -1.0;
-  U.extraPct     = doc["extra_pct"] | -1.0;
-  U.extraEnabled = doc["extra_enabled"] | false;
+  if (deserializeJson(doc, payload)) { g_link = LINK_NO_PROXY; return false; }
+  U.ok = doc["ok"] | false;
+  // 本地数据(token / 活跃会话 / 天气 / 7天趋势):代理可达即新鲜,始终更新
   U.tokToday     = doc["tok_today"].as<int64_t>();
   U.activeTok    = doc["active_tok"].as<int64_t>();
   U.activeMsgs   = doc["active_msgs"] | 0;
   U.activeIdle   = doc["active_idle_s"] | -1L;
-  strlcpy(U.plan, doc["plan"] | "", sizeof(U.plan));
   strlcpy(U.activeProj, doc["active_project"] | "?", sizeof(U.activeProj));
   JsonObject wx = doc["weather"];
   if (!wx.isNull()) {
@@ -780,7 +940,24 @@ bool poll() {
   U.weekTok    = doc["week_tok"].as<int64_t>();
   U.cost7dUsd  = doc["cost_7d_usd"] | 0.0;
   U.cost30dUsd = doc["cost_30d_usd"] | 0.0;
-  U.fetchMs = millis();
+  // 限额%靠上游:只有 ok 时才更新,否则保留上次正常值并标过期(stale 显示)
+  if (U.ok) {
+    U.sessionPct   = doc["session_pct"] | 0.0;
+    U.sessionReset = doc["session_reset_s"] | 0L;
+    U.weekPct      = doc["week_pct"] | 0.0;
+    U.weekReset    = doc["week_reset_s"] | 0L;
+    U.sonnetPct    = doc["sonnet_pct"] | -1.0;
+    U.opusPct      = doc["opus_pct"] | -1.0;
+    U.extraPct     = doc["extra_pct"] | -1.0;
+    U.extraEnabled = doc["extra_enabled"] | false;
+    strlcpy(U.plan, doc["plan"] | "", sizeof(U.plan));
+    U.fetchMs    = millis();          // 限额倒计时基准(仅在拿到新限额时重置)
+    U.haveLimits = true;
+    U.liveMs     = millis();
+    g_link = LINK_LIVE;
+  } else {
+    g_link = LINK_NO_UPSTREAM;         // 代理通但上游(Clash/api)挂了 → 显示上次限额(过期)
+  }
   return true;
 }
 
@@ -789,7 +966,7 @@ bool poll() {
 void pollTask(void*) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(POLL_MS));
-    if (WiFi.status() != WL_CONNECTED) continue;
+    if (WiFi.status() != WL_CONNECTED) { g_link = LINK_NO_WIFI; continue; }
     lastOnline = millis();
     if (poll()) pollFails = 0;
     else if (++pollFails >= 3) {                 // 连续拉不到 → proxy IP 可能变了,广播重找
@@ -824,8 +1001,9 @@ void connectWiFi() {
 // ---------------------- setup / loop ----------------------
 void setup() {
   Serial.begin(115200);
+  loadCfg();                                      // 读用户设置:语言/亮度/时制/温标
   pinMode(PWR_PIN, OUTPUT); digitalWrite(PWR_PIN, HIGH);
-  pinMode(BL_PIN, OUTPUT);  digitalWrite(BL_PIN, HIGH);
+  ledcAttach(BL_PIN, 5000, 8); applyBright();     // 背光改 PWM,亮度可调
   pinMode(BTN_PIN, INPUT_PULLUP);
   Wire.begin(11, 10); Wire.setClock(400000);    // 触摸 + 电量 I2C
   g_bat = readBattery();
@@ -896,6 +1074,14 @@ void loop() {
       if (gst == 2) { stwRun = false; stwAcc = 0; }
       else if (stwRun) { stwAcc += now - stwT0; stwRun = false; }
       else { stwT0 = now; stwRun = true; }
+    } else if (app == 6 && gst == 1) {           // Setup:点行切换设置(语言/亮度/时制/温标/动作)
+      int idx = (tapY - (SET_Y0 - 8)) / SET_DY;
+      if (idx == 0)      { g_lang ^= 1;                 saveCfg(); }
+      else if (idx == 1) { g_bright = (g_bright + 1) % 5; applyBright(); saveCfg(); }
+      else if (idx == 2) { g_clk24 = !g_clk24;          saveCfg(); }
+      else if (idx == 3) { g_tempF = !g_tempF;          saveCfg(); }
+      else if (idx == 4) { showSetupScreen(); netStartPortal(); }   // 不返回(重启)
+      else if (idx == 5) { ESP.restart(); }
     }
     render(); lastRender = now;
   }
