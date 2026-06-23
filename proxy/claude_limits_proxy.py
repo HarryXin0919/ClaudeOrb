@@ -124,8 +124,19 @@ def fetch_limits():
         "User-Agent": CC_UA,
         "Content-Type": "application/json",
     })
-    with _opener.open(req, timeout=20) as r:
-        j = json.loads(r.read().decode("utf-8"))
+    try:
+        with _opener.open(req, timeout=20) as r:
+            j = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        # UPSTREAM_PROXY(Clash)连不上时直连兜底(当前网络可直连/Clash TUN 时)
+        req2 = urllib.request.Request(USAGE_URL, headers={
+            "Authorization": "Bearer " + tok,
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": CC_UA,
+            "Content-Type": "application/json",
+        })
+        with _direct.open(req2, timeout=20) as r:
+            j = json.loads(r.read().decode("utf-8"))
     fh = j.get("five_hour") or {}
     sd = j.get("seven_day") or {}
     so = j.get("seven_day_sonnet")
