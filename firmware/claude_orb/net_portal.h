@@ -290,6 +290,9 @@ void netStartPortal() {
       + _netScanOpts +
       "<option value=\"\">manual input...</option></select>"
       "<input id=m name=ssid2 placeholder=SSID style=\"display:none;margin-top:8px\">"
+      "<label style=\"display:flex;align-items:center;gap:8px;margin-top:12px\">"
+      "<input id=entbox type=checkbox style=\"width:auto\"> Enterprise WiFi / school login</label>"
+      "<input id=ent name=ent type=hidden value=0>"
       "<div id=urow style=\"display:none\">"
       "<label>Username <span style=\"color:#8ea4b8\">&middot; school / work login</span></label>"
       "<input name=user autocapitalize=none autocorrect=off spellcheck=false "
@@ -314,10 +317,14 @@ void netStartPortal() {
       // 会把扫不到网络的用户卡死(无法输 SSID)。这段在 load 时跑一次补上。
       "<script>var EN=[" + _netEntJs + "];(function(){"
       "var s=document.querySelector('select[name=ssid]'),"
-      "m=document.getElementById('m'),ur=document.getElementById('urow');"
+      "m=document.getElementById('m'),ur=document.getElementById('urow'),"
+      "eb=document.getElementById('entbox'),ev=document.getElementById('ent');"
       "function u(){var man=!s.value;m.style.display=man?'block':'none';"      // 选了"手动输入"才显示 SSID 框
-      "ur.style.display=(man||EN.indexOf(parseInt(s.value,10))>=0)?'block':'none';}"  // 企业网或手动 → 显示用户名框
-      "s.addEventListener('change',u);u();})();</script>"
+      "var auto=EN.indexOf(parseInt(s.value,10))>=0;"
+      "if(auto)eb.checked=true;"
+      "var ent=auto||eb.checked;ev.value=ent?'1':'0';"
+      "ur.style.display=ent?'block':'none';}"  // 只有企业网才显示用户名框,普通手动 SSID 不再误走 EAP
+      "s.addEventListener('change',u);eb.addEventListener('change',u);u();})();</script>"
       "</body></html>";
   };
 
@@ -340,6 +347,7 @@ void netStartPortal() {
     if (!ssid.length()) { ssid = srv.arg("ssid2"); ssid.trim(); }   // 手动框:去首尾空白再判空
     String pass = srv.arg("pass"), proxy = srv.arg("proxy");
     String user = srv.arg("user"); user.trim();      // 企业网用户名;留空=普通 PSK 网络(走纯密码)
+    if (srv.arg("ent") != "1") user = "";            // 未勾企业网时强制普通 WiFi,避免误填 username 导致连接失败
     if (ssid.length()) netSaveWiFi(ssid, pass, user);
     proxy.trim();
     if (proxy.length()) {                            // 手填 host[:port];留空走自动发现
@@ -347,8 +355,8 @@ void netStartPortal() {
       if (c > 0) netSaveProxy(proxy.substring(0, c), (uint16_t)proxy.substring(c + 1).toInt());
       else       netSaveProxy(proxy, NET_DEF_PROXY_PORT);
     }
-    String ptok = srv.arg("ptok"); ptok.trim();      // proxy token:填了才存,留空=保留原值
-    if (ptok.length()) netSaveToken(ptok);
+    String ptok = srv.arg("ptok"); ptok.trim();      // 留空=清掉运行期 token,回落到编译期 NET_PROXY_QUERY
+    netSaveToken(ptok);
     srv.send(200, "text/html", "<body style=\"background:#0b0d10;color:#e8edf2;"
              "font-family:system-ui;text-align:center;padding-top:40vh\">saved, rebooting...</body>");
     delay(1500);

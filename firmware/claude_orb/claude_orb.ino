@@ -33,6 +33,7 @@
 #define NET_DEF_PASS       "YOUR_WIFI_PASSWORD"
 #define NET_DEF_PROXY_HOST "192.168.1.50"       // fallback when discovery fails
 #define NET_DEF_PROXY_PORT 8787
+#define NET_PROXY_QUERY    "?token=orb123"      // must match the proxy's PROXY_TOKEN; can be overridden in setup portal
 #define NET_AP_NAME        "ClaudeOrb-Setup"    // setup hotspot name
 #include "net_portal.h"
 const uint32_t POLL_MS   = 12000;    // poll interval (background task; proxy caches: limits 180s / details 8s)
