@@ -20,7 +20,7 @@ no organization account, nothing pasted anywhere.
    | Claude Clock Weathr |  --->  | SESSION       29%   |        |    21:36 45         |
    |                     |        | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  also: |    THU JUN 12       |
    | Timer  Stopw Setup  |        | WEEKLY        12%   |        |       26°           |
-   |    (2 x 3 icons)    |  BOOT  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |  Timer: pomodoro ring      |
+   |  + CodexOrb app     |  BOOT  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |  Timer: pomodoro ring      |
    |                     |  <---  |   ● CLAUDE CODE     |  Stopwatch: 1-min ring     |
    |                     |        |  swipe to flip page |  Weather / Setup           |
    └─────────────────────┘        └─────────────────────┘        └─────────────────────┘
@@ -148,10 +148,13 @@ So the proxy comes back after a reboot:
 ## Usage
 
 - **Home — app grid:** a phone‑style launcher. Status bar (time + battery pill) and
-  six apps; **tap an icon** to open one, press **BOOT** (the home button) to go back.
+  seven apps; **tap an icon** to open one, press **BOOT** (the home button) to go back.
 - **Claude:** the usage dashboard — page 1 has SESSION / WEEKLY gauges with live reset
   countdowns; page 2 has every limit tier (5H / WEEK / SONNET / OPUS / EXTRA), today's
   token total, and your active Claude Code session. **Swipe** (any direction) to flip.
+- **CodexOrb:** a local-agent status app. It shows the live WiFi → proxy → upstream
+  chain, today's local token total, 7‑day estimated spend, active project and battery.
+  It does not claim to read an official Codex billing endpoint.
 - **Clock:** big digital clock with ticking seconds, date, current temperature.
   The bezel is a continuous **ring gauge** of SESSION usage (lit clockwise from 12,
   shifting amber/red as you approach the limit); a white dot sweeps the ring with

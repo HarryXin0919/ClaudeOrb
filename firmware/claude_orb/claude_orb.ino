@@ -1,6 +1,6 @@
 /* ============================================================================
    ClaudeOrb — phone-style launcher on Waveshare ESP32-S3-Touch-LCD-1.85B (ST77916 360x360)
-   Home: 2x3 app icon grid (Claude / Clock / Weather / Timer / Stopwatch / Setup)
+   Home: app icon grid (Claude / Clock / Weather / Timer / Stopwatch / Setup / CodexOrb)
    + status bar (time, battery pill). Tap an icon to open an app; BOOT (GPIO0)
    = home button; hold BOOT 3s = WiFi setup portal.
    - Claude:    usage dashboard, 3 pages (swipe: overview / details / 7-day trend)
@@ -110,7 +110,7 @@ struct Usage {
   uint32_t fetchMs = 0, liveMs = 0;
 } U;
 uint32_t lastPoll = 0, lastRender = 0;
-int app = 0;                          // 0=主屏 1=Claude 2=Clock 3=Weather 4=Timer 5=Stopwatch 6=Setup;BOOT=Home键
+int app = 0;                          // 0=Home 1=Claude 2=Clock 3=Weather 4=Timer 5=Stopwatch 6=Setup 7=CodexOrb
 int page = 0;
 // Timer(番茄钟)状态:切回主屏也继续走,到点自动跳回提醒
 const int TMR_PRESETS[4] = {5, 10, 25, 45};      // 分钟
@@ -323,6 +323,7 @@ bool pillPos(int& px, int& py) {
   if (app == 0) { px = 180; py = 44;  return true; }   // 主屏:时间正下方
   if (app == 1) { px = 272; py = 298; return true; }   // Claude:底栏右
   if (app == 2) { px = 180; py = 292; return true; }   // Clock:中轴底部
+  if (app == 7) { px = 180; py = 292; return true; }   // CodexOrb:中轴底部
   return false;
 }
 // 充电动画帧:只重画胶囊内部到 output(不整屏刷,不闪)
@@ -508,10 +509,12 @@ void drawWxIcon(int cx, int cy, int code, int s) {
 
 // ---------------------- 主屏:App 图标网格(像手机一样,点图标进 App) ----------------------
 struct AppIcon { int cx, cy; const char* label; };
-const AppIcon ICONS[6] = {
-  { 84, 140, "Claude"}, {180, 140, "Clock"},     {276, 140, "Weather"},
-  { 84, 252, "Timer"},  {180, 252, "Stopwatch"}, {276, 252, "Setup"}};
-const char* ICONS_ZH[6] = {"Claude", "时钟", "天气", "计时", "秒表", "设置"};
+const int APP_COUNT = 7;
+const AppIcon ICONS[APP_COUNT] = {
+  { 84, 124, "Claude"}, {180, 124, "Clock"},     {276, 124, "Weather"},
+  { 84, 226, "Timer"},  {180, 226, "Stopwatch"}, {276, 226, "Setup"},
+  {180, 306, "Codex"}};
+const char* ICONS_ZH[APP_COUNT] = {"Claude", "时钟", "天气", "计时", "秒表", "设置", "Codex"};
 void drawTile(int cx, int cy) {                  // iOS 风圆角图标底
   gfx->drawRoundRect(cx - 32, cy - 32, 64, 64, 14, C_BAROFF);
   gfx->drawRoundRect(cx - 31, cy - 31, 62, 62, 13, C_BAROFF);
@@ -523,7 +526,7 @@ void renderHome() {
     char hm[8]; fmtHM(hm, sizeof(hm), t.tm_hour, t.tm_min);
     txt(hm, CX - txtW(hm, 2) / 2, 12, 2, C_WHITE);
   }
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < APP_COUNT; i++) {
     drawTile(ICONS[i].cx, ICONS[i].cy);
     lbl(ICONS[i].label, ICONS_ZH[i], ICONS[i].cx, ICONS[i].cy + 40, 1, C_DIM, 1);
   }
@@ -563,6 +566,14 @@ void renderHome() {
     }
     gfx->fillCircle(cx, cy, 12, C_DIM);
     gfx->fillCircle(cx, cy, 5, C_BG); }
+  // CodexOrb icon: small terminal orb
+  { int cx = ICONS[6].cx, cy = ICONS[6].cy;
+    gfx->drawRoundRect(cx - 21, cy - 17, 42, 34, 7, C_ORANGE);
+    gfx->drawRoundRect(cx - 20, cy - 16, 40, 32, 6, C_BAROFF);
+    txt(">", cx - 13, cy - 7, 2, C_ORANGE);
+    gfx->fillRect(cx + 2, cy + 10, 14, 3, C_GLOW);
+    gfx->fillCircle(cx + 16, cy - 11, 3, C_GREEN);
+  }
   drawBatteryPill(180, 44);
   drawLinkDots(CX - 12, 78);                      // 链路灯:WiFi/代理/实时,主屏一眼可见
 }
@@ -796,6 +807,39 @@ void renderSettings() {
   lbl("hold BOOT 3s = WiFi", "长按BOOT 3秒配网", CX, 296, 1, C_ORANGE, 1);
 }
 
+// ---------------------- CodexOrb App: local agent status ----------------------
+void renderCodexOrb() {
+  gfx->fillScreen(C_BG);
+  drawRingEx(U.haveLimits ? constrain(U.weekPct, 0.0f, 100.0f) * 3.6f : 0, C_BLUE, -1, U.haveLimits);
+
+  lbl("CODEXORB", "CodexOrb", CX, 42, 3, C_WHITE, 1);
+  gfx->drawRoundRect(126, 86, 108, 68, 16, C_ORANGE);
+  gfx->drawRoundRect(128, 88, 104, 64, 15, C_BAROFF);
+  txt(">", 148, 111, 4, C_ORANGE);
+  gfx->fillRect(190, 138, 24, 4, C_GLOW);
+  gfx->fillCircle(216, 101, 5, g_link == LINK_LIVE ? C_GREEN : linkColor());
+
+  lbl("LOCAL AGENT", "本地代理", CX, 166, 2, C_DIM, 1);
+  lbl(g_link == LINK_LIVE ? "CONNECTED" : lwEN(),
+      g_link == LINK_LIVE ? "已连接" : lwZH(),
+      CX, 190, 2, linkColor(), 1);
+  drawLinkDots(CX - 12, 224);
+
+  gfx->drawFastHLine(58, 242, 244, C_BAROFF);
+  lbl("TODAY TOK", "今日Token", 64, 254, 1, C_DIM, 0);
+  String tok = humanTok(U.tokToday);
+  txt(tok, 296 - txtW(tok, 2), 248, 2, dataStale() ? C_DIM : C_WHITE);
+
+  lbl("7D COST", "7日花费", 64, 276, 1, C_DIM, 0);
+  char cb[18]; snprintf(cb, sizeof(cb), "$%.2f", U.cost7dUsd);
+  txt(String(cb), 296 - txtW(String(cb), 2), 270, 2, dataStale() ? C_DIM : C_ORANGE);
+
+  String proj = String(U.activeProj);
+  if (proj.length() > 16) proj = proj.substring(0, 16);
+  txt(proj, CX - txtW(proj, 1) / 2, 318, 1, C_DIM);
+  drawBatteryPill(180, 292);
+}
+
 // ---------------------- Page 3：近 7 天 token 趋势(柱状 + 趋势线) ----------------------
 void renderPage3() {
   gfx->fillScreen(C_BG);
@@ -880,6 +924,9 @@ String computeSig() {
     return "P" + String(stwNow() / 100) + (stwRun ? "r" : "p");
   if (app == 6)                                  // Setup:网络状态(RSSI 量化防闪)
     return "S" + bt + netCfg.ssid + WiFi.localIP().toString() + String(WiFi.RSSI() / 5) + netCfg.proxyHost + String(g_link);
+  if (app == 7)
+    return "X" + bt + String(g_link) + humanTok(U.tokToday) + String((int)U.cost7dUsd)
+         + pctStr(U.weekPct) + String(U.activeProj);
   String s = "C" + String(page) + String(g_link) + bt;
   s += pctStr(U.sessionPct) + pctStr(U.weekPct)
      + fmtReset(liveReset(U.sessionReset)) + fmtReset(liveReset(U.weekReset));
@@ -900,6 +947,7 @@ void render() {
   else if (app == 4) renderTimer();
   else if (app == 5) renderStopwatch();
   else if (app == 6) renderSettings();
+  else if (app == 7) renderCodexOrb();
   else if (page == 0) renderPage1();
   else if (page == 1) renderPage2();
   else                renderPage3();
@@ -967,13 +1015,18 @@ bool poll() {
 void pollTask(void*) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+    if (g_inPortal) { g_pollBusy = false; continue; } // 配网中:让出 WiFi,绝不碰驱动
     if (WiFi.status() != WL_CONNECTED) { g_link = LINK_NO_WIFI; continue; }
-    lastOnline = millis();
-    if (poll()) pollFails = 0;
-    else if (++pollFails >= 3) {                 // 连续拉不到 → proxy IP 可能变了,广播重找
-      netDiscoverProxy(2);
-      pollFails = 0;
+    g_pollBusy = true;                                // 占住:复检 g_inPortal 关掉窗口竞争
+    if (!g_inPortal) {
+      lastOnline = millis();
+      if (poll()) pollFails = 0;
+      else if (++pollFails >= 3) {                 // 连续拉不到 → proxy IP 可能变了,广播重找
+        netDiscoverProxy(2);
+        pollFails = 0;
+      }
     }
+    g_pollBusy = false;
   }
 }
 
@@ -1055,7 +1108,7 @@ void loop() {
   int gst = checkGesture();
   if (gst) {
     if (app == 0 && gst == 1) {
-      for (int i = 0; i < 6; i++)
+      for (int i = 0; i < APP_COUNT; i++)
         if (abs(tapX - ICONS[i].cx) <= 36 && abs(tapY - ICONS[i].cy) <= 42) { app = i + 1; page = 0; break; }
     } else if (app == 1 && gst == 2) {
       page = (page + 1) % 3;

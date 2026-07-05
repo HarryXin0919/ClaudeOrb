@@ -19,7 +19,7 @@ ESP32-S3 屏上。一眼就能看到当前 **5 小时会话**和**每周**限额
    | Claude Clock Weathr |  --->  | SESSION       29%   |        |    21:36 45         |
    |                     |        | ▮▮▮▮▮▯▯▯▯▯▯▯▯  35m   |  还有: |    THU JUN 12       |
    | Timer  Stopw Setup  |        | WEEKLY        12%   |        |       26°           |
-   |   (2 x 3 图标)      |  BOOT  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |  Timer: 番茄钟环           |
+   |  + CodexOrb App     |  BOOT  | ▮▮▮▯▯▯▯▯▯▯▯▯▯  5d    |  Timer: 番茄钟环           |
    |                     |  <---  |   ● CLAUDE CODE     |  Stopwatch: 每分钟一圈     |
    |                     |        |   滑动翻页          |  Weather / Setup           |
    └─────────────────────┘        └─────────────────────┘        └─────────────────────┘
@@ -134,11 +134,13 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=hug
 
 ## 使用
 
-- **主屏 · 图标网格:** 手机式启动器——状态栏(时间 + 电量胶囊)+ 六个 App 图标,
+- **主屏 · 图标网格:** 手机式启动器——状态栏(时间 + 电量胶囊)+ 七个 App 图标,
   **点图标**打开,按 **BOOT**(Home 键)返回主屏。
 - **Claude:** 用量仪表盘——第 1 页 SESSION / WEEKLY 大表 + 实时重置倒计时;
   第 2 页各档限额(5H / WEEK / SONNET / OPUS / EXTRA)、今日 token、活跃会话。
   **滑动**(任意方向)翻页。
+- **CodexOrb:** 本地 agent 状态页。显示 WiFi → 代理 → 上游的实时链路、今日本地
+  token、7 日美元估算、当前活跃项目和电量。它不声称读取 Codex 官方账单接口。
 - **Clock:** 大数字时钟带秒、日期、当前气温;表圈是连续的 **SESSION 用量环**
   (12 点起顺时针,逼近限额变琥珀/红色),白色亮点沿环带随秒扫动。
   时间走 NTP(`.ino` 顶部 `TZ_OFFSET_S` / `NTP_1` / `NTP_2` 可改)。
