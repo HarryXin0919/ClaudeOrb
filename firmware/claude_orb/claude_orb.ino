@@ -56,16 +56,16 @@ Arduino_GFX* gfx = canvas;
 
 // ---------------------- 配色 ----------------------
 #define RGB565(r, g, b) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
-const uint16_t C_BG     = RGB565(8, 8, 10);
-const uint16_t C_ORANGE = RGB565(244, 168, 54);
-const uint16_t C_GLOW   = RGB565(255, 200, 120);
-const uint16_t C_DIM    = RGB565(165, 135, 122);
-const uint16_t C_BAROFF = RGB565(52, 38, 32);
-const uint16_t C_WHITE  = RGB565(238, 232, 226);
+const uint16_t C_BG     = RGB565(9, 11, 14);
+const uint16_t C_ORANGE = RGB565(142, 164, 184);  // primary accent; name kept for older drawing code
+const uint16_t C_GLOW   = RGB565(214, 226, 234);
+const uint16_t C_DIM    = RGB565(150, 160, 170);
+const uint16_t C_BAROFF = RGB565(39, 47, 56);
+const uint16_t C_WHITE  = RGB565(232, 237, 242);
 const uint16_t C_GREEN  = RGB565(120, 210, 140);
 const uint16_t C_AMBER  = RGB565(241, 196, 15);
 const uint16_t C_RED    = RGB565(231, 88, 70);
-const uint16_t C_BLUE   = RGB565(92, 156, 255);
+const uint16_t C_BLUE   = RGB565(124, 158, 194);
 
 const int CX = 180, CY = 180;
 
@@ -511,9 +511,9 @@ void drawWxIcon(int cx, int cy, int code, int s) {
 struct AppIcon { int cx, cy; const char* label; };
 const int APP_COUNT = 7;
 const AppIcon ICONS[APP_COUNT] = {
-  { 84, 124, "Claude"}, {180, 124, "Clock"},     {276, 124, "Weather"},
-  { 84, 226, "Timer"},  {180, 226, "Stopwatch"}, {276, 226, "Setup"},
-  {180, 306, "Codex"}};
+  {132, 120, "Claude"}, { 84, 212, "Clock"},     {180, 212, "Weather"},
+  {276, 212, "Timer"},  {132, 288, "Stopwatch"}, {228, 288, "Setup"},
+  {228, 120, "Codex"}};
 const char* ICONS_ZH[APP_COUNT] = {"Claude", "时钟", "天气", "计时", "秒表", "设置", "Codex"};
 void drawTile(int cx, int cy) {                  // iOS 风圆角图标底
   gfx->drawRoundRect(cx - 32, cy - 32, 64, 64, 14, C_BAROFF);

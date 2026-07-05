@@ -155,7 +155,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=hug
 
 ## 自定义
 
-- **配色 / 主题:** 改 `.ino` 顶部的 `C_*` 常量(`C_ORANGE` 是主色,默认 Claude 橙黄 `#F4A836`)。
+- **配色 / 主题:** 改 `.ino` 顶部的 `C_*` 常量(`C_ORANGE` 是主强调色,当前默认是中性的蓝灰色)。
 - **Logo:** `firmware/claude_orb/claude_logo.h` 由 `tools/gen_logo.py` 生成
   (`pip install pillow` 后跑 `python tools/gen_logo.py`)。传 `--color R,G,B` 换色。
 - **刷新率:** `POLL_MS`(设备多久轮询一次代理)、代理的 `CACHE_TTL`(限额,默认 180s——

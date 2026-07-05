@@ -271,16 +271,16 @@ void netStartPortal() {
       "<!doctype html><html><head><meta charset=utf-8>"
       "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
       "<title>Claude Dash Setup</title><style>"
-      "body{font-family:system-ui;background:#16120e;color:#eee8e2;margin:0;padding:24px}"
-      ".card{max-width:420px;margin:auto}h1{font-size:20px;color:#f4a836}"
-      "label{display:block;margin:14px 0 6px;font-size:13px;color:#a58772}"
-      "select,input{width:100%;padding:10px;border-radius:8px;border:1px solid #5a4636;"
-      "background:#241c15;color:#eee8e2;font-size:15px;box-sizing:border-box}"
+      "body{font-family:system-ui;background:#0b0d10;color:#e8edf2;margin:0;padding:24px}"
+      ".card{max-width:420px;margin:auto}h1{font-size:20px;color:#8ea4b8}"
+      "label{display:block;margin:14px 0 6px;font-size:13px;color:#96a0aa}"
+      "select,input{width:100%;padding:10px;border-radius:8px;border:1px solid #2b3540;"
+      "background:#121820;color:#e8edf2;font-size:15px;box-sizing:border-box}"
       "button{margin-top:20px;width:100%;padding:12px;border:0;border-radius:8px;"
-      "background:#f4a836;color:#1a140e;font-size:16px;font-weight:700}"
-      ".hint{font-size:12px;color:#7a6552;margin-top:6px}"
+      "background:#8ea4b8;color:#080b0f;font-size:16px;font-weight:700}"
+      ".hint{font-size:12px;color:#7f8b96;margin-top:6px}"
       ".row{display:flex;align-items:center;justify-content:space-between}"
-      ".rescan{font-size:12px;color:#f4a836;text-decoration:none;border:1px solid #5a4636;"
+      ".rescan{font-size:12px;color:#8ea4b8;text-decoration:none;border:1px solid #2b3540;"
       "padding:4px 10px;border-radius:6px}"
       "</style></head><body><div class=card><h1>Claude Dash &middot; WiFi</h1>"
       "<form method=POST action=/save>"
@@ -291,7 +291,7 @@ void netStartPortal() {
       "<option value=\"\">manual input...</option></select>"
       "<input id=m name=ssid2 placeholder=SSID style=\"display:none;margin-top:8px\">"
       "<div id=urow style=\"display:none\">"
-      "<label>Username <span style=\"color:#f4a836\">&middot; school / work login</span></label>"
+      "<label>Username <span style=\"color:#8ea4b8\">&middot; school / work login</span></label>"
       "<input name=user autocapitalize=none autocorrect=off spellcheck=false "
       "placeholder=\"e.g. you@jh.edu\"></div>"
       "<label>Password</label><input name=pass type=password>"
@@ -349,7 +349,7 @@ void netStartPortal() {
     }
     String ptok = srv.arg("ptok"); ptok.trim();      // proxy token:填了才存,留空=保留原值
     if (ptok.length()) netSaveToken(ptok);
-    srv.send(200, "text/html", "<body style=\"background:#16120e;color:#eee8e2;"
+    srv.send(200, "text/html", "<body style=\"background:#0b0d10;color:#e8edf2;"
              "font-family:system-ui;text-align:center;padding-top:40vh\">saved, rebooting...</body>");
     delay(1500);
     ESP.restart();
