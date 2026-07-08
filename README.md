@@ -12,6 +12,8 @@ It reads the **same numbers Claude Code shows on its "Plan usage limits" page**
 no organization account, nothing pasted anywhere.
 
 > Works with a **Claude Pro / Max** subscription used through Claude Code.
+> This is a real personal-use display, not a public/high-volume proxy service. One
+> small local proxy serves your own orb on your own network.
 
 ```
    ┌─ Home ── app grid ──┐        ┌─ Claude ─ 2 pages ──┐        ┌─ Clock ─────────────┐
@@ -81,20 +83,31 @@ Requires **Python 3.8+** — *zero* third‑party packages. You must already be 
 python proxy/claude_limits_proxy.py
 ```
 
-You should see `Claude 用量代理 → http://0.0.0.0:8787/usage`. Open
+You should see `Claude 用量代理 → http://127.0.0.1:8787/usage`. Open
 `http://localhost:8787/usage` in a browser — you should get JSON with `session_pct`,
 `week_pct`, `tok_today`, etc.
 
-- No need to look up your PC's IP — the screen **finds the proxy by UDP broadcast**
-  (port 8788) and follows it if your PC's IP changes.
+To let the orb reach the proxy over your LAN, bind the proxy to all interfaces and
+protect it with a token:
+
+```powershell
+$env:BIND_HOST="0.0.0.0"; $env:PROXY_TOKEN="orb123"; python proxy/claude_limits_proxy.py
+```
+
+```bash
+BIND_HOST=0.0.0.0 PROXY_TOKEN=orb123 python proxy/claude_limits_proxy.py
+```
+
+- No need to look up your PC's IP — once the proxy is LAN-reachable, the screen
+  **finds it by UDP broadcast** (port 8788) and follows it if your PC's IP changes.
 - **Allow it through the firewall**: when prompted, let Python accept inbound
   connections (TCP `8787` + UDP `8788`).
 - **Can't reach `api.anthropic.com` directly** (e.g. mainland China)? Route the proxy
   through your local HTTP proxy: `UPSTREAM_PROXY=http://127.0.0.1:7890 python proxy/claude_limits_proxy.py`.
-- **Security:** the proxy listens on your LAN and never returns your OAuth token —
-  only derived percentages. On a shared/untrusted network, set `PROXY_TOKEN=<secret>`
-  and set `#define NET_PROXY_QUERY "?token=<secret>"` in the firmware (or send
-  `Authorization: Bearer <secret>`); requests without it get 401.
+- **Security:** the proxy never returns your OAuth token — only derived percentages.
+  If `BIND_HOST` is not loopback, the script requires `PROXY_TOKEN`; put the same
+  token in the setup portal or set `#define NET_PROXY_QUERY "?token=<secret>"` in
+  the firmware. Requests without it get 401.
 
 Keep it running. See [Autostart](#autostart-optional) to launch it at login.
 
@@ -160,7 +173,8 @@ So the proxy comes back after a reboot:
   shifting amber/red as you approach the limit); a white dot sweeps the ring with
   the seconds. NTP time (`TZ_OFFSET_S` / `NTP_1` / `NTP_2` in the `.ino`).
 - **Weather:** current conditions (feels‑like / humidity / wind) + 5‑day forecast,
-  from the proxy's Open‑Meteo data.
+  from the proxy's Open‑Meteo data. Set `WX_LAT`, `WX_LON`, `WX_CITY`, and `WX_TZ`
+  together so the city label, daily forecast, and hourly forecast stay geo-consistent.
 - **Timer:** pomodoro‑style countdown drawn on the ring (5 / 10 / 25 / 45 min —
   tap the top half to cycle presets, bottom half to start/pause, swipe to reset).
   Keeps running in the background and flashes TIME'S UP when done.

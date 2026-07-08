@@ -11,6 +11,8 @@ ESP32-S3 屏上。一眼就能看到当前 **5 小时会话**和**每周**限额
 不需要组织账户、不用把任何东西贴到别处**。
 
 > 适用于通过 Claude Code 使用的 **Claude Pro / Max** 订阅。
+> 这是给个人真实用量看的本地小屏,不是公网/高并发代理服务;一个本地 proxy
+> 服务你自己网络里的 orb。
 
 ```
    ┌─ 主屏 · 图标网格 ───┐        ┌─ Claude · 双页 ─────┐        ┌─ Clock ─────────────┐
@@ -77,17 +79,27 @@ token **永远不离开你的电脑**,也**绝不会被烧进设备**。代理�
 python proxy/claude_limits_proxy.py
 ```
 
-应当看到 `Claude 用量代理 → http://0.0.0.0:8787/usage`。浏览器打开
+应当看到 `Claude 用量代理 → http://127.0.0.1:8787/usage`。浏览器打开
 `http://localhost:8787/usage`,应能拿到含 `session_pct`、`week_pct`、`tok_today` 等的 JSON。
 
-- 不用查电脑 IP——屏会用 **UDP 广播自动发现代理**(8788 端口),电脑 IP 变了也能跟上。
+如果要让 orb 从局域网访问这台电脑,需要把 proxy 绑定到所有网卡,并加 token:
+
+```powershell
+$env:BIND_HOST="0.0.0.0"; $env:PROXY_TOKEN="orb123"; python proxy/claude_limits_proxy.py
+```
+
+```bash
+BIND_HOST=0.0.0.0 PROXY_TOKEN=orb123 python proxy/claude_limits_proxy.py
+```
+
+- 不用查电脑 IP——proxy 已经能被局域网访问后,屏会用 **UDP 广播自动发现代理**
+  (8788 端口),电脑 IP 变了也能跟上。
 - **放行防火墙**:首次弹窗时允许 Python 接受入站连接(TCP `8787` + UDP `8788`)。
 - **直连不到 `api.anthropic.com`**(如中国大陆)?让代理走你本地的 HTTP 代理:
   `UPSTREAM_PROXY=http://127.0.0.1:7890 python proxy/claude_limits_proxy.py`(Clash 等)。
-- **安全**:代理只在局域网内服务,且**绝不返回你的 OAuth token**——只给派生的百分比数字。
-  在合租/公共等不可信网络上,设 `PROXY_TOKEN=<密码>`,固件里加
-  `#define NET_PROXY_QUERY "?token=<密码>"`(或发 `Authorization: Bearer <密码>` 头);
-  没带的请求一律 401。
+- **安全**:代理**绝不返回你的 OAuth token**——只给派生的百分比数字。只要
+  `BIND_HOST` 不是本机环回地址,脚本就要求设置 `PROXY_TOKEN`;把同一个 token
+  填进配网页面,或在固件里设 `#define NET_PROXY_QUERY "?token=<密码>"`。没带的请求一律 401。
 
 让它一直开着。开机自启见 [自启](#自启可选)。
 
@@ -145,6 +157,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=hug
   (12 点起顺时针,逼近限额变琥珀/红色),白色亮点沿环带随秒扫动。
   时间走 NTP(`.ino` 顶部 `TZ_OFFSET_S` / `NTP_1` / `NTP_2` 可改)。
 - **Weather:** 当前天气(体感/湿度/风速)+ 5 天预报,数据来自代理的 Open-Meteo。
+  `WX_LAT`、`WX_LON`、`WX_CITY`、`WX_TZ` 要一起设置,这样城市名、每日预报和逐小时预报才保持地理一致。
 - **Timer:** 番茄钟,剩余时间画在环上(5 / 10 / 25 / 45 分钟——点上半屏切预设,
   点下半屏开始/暂停,滑动重置)。切去别的页面照样计时,到点自动跳回闪烁提醒。
 - **Stopwatch:** 秒表,环每分钟扫一圈;点按起停,滑动清零。

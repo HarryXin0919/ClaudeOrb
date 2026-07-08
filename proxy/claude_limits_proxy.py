@@ -12,7 +12,7 @@ Claude 用量代理 (订阅版, 双页) —— 给 ESP32-S3 圆屏喂数据。
 都不进固件、不出局域网。
 
 跑法: python claude_limits_proxy.py    ->  ESP32 GET http://<本机IP>:8787/usage
-环境变量: PORT / CACHE_TTL(限额) / DET_TTL(细节) / UPSTREAM_PROXY / CC_UA / CRED_FILE / CLAUDE_PROJECTS_DIR / PROXY_TOKEN
+环境变量: PORT / CACHE_TTL(限额) / DET_TTL(细节) / UPSTREAM_PROXY / CC_UA / CRED_FILE / CLAUDE_PROJECTS_DIR / PROXY_TOKEN / WX_LAT / WX_LON / WX_CITY / WX_TZ
 """
 import os
 import re
@@ -430,12 +430,15 @@ def fetch_weather():
             dow = ""
         days.append({"d": dow, "c": int(codes[i]),
                      "hi": int(round(his[i])), "lo": int(round(los[i]))})
-    # 逐时:从当前整点起取 12 小时
+    # 逐时:从 Open-Meteo 返回的 current.time 起取 12 小时。
+    # Do not use the PC's local timezone here: WX_LAT/WX_LON/WX_TZ may point to
+    # a different city than the machine running the proxy.
     hr = j.get("hourly") or {}
     htimes = hr.get("time", []); htemps = hr.get("temperature_2m", []); hprec = hr.get("precipitation_probability", [])
     h0 = 0
     try:
-        nowh = dt.datetime.now().replace(minute=0, second=0, microsecond=0)
+        current_ts = cur.get("time") or (htimes[0] if htimes else "")
+        nowh = dt.datetime.fromisoformat(str(current_ts)).replace(minute=0, second=0, microsecond=0)
         for i, ts in enumerate(htimes):
             if dt.datetime.fromisoformat(ts) >= nowh:
                 h0 = i; break
@@ -449,7 +452,8 @@ def fetch_weather():
             "now_feels": int(round(cur.get("apparent_temperature", cur.get("temperature_2m", 0)))),
             "now_hum": int(round(cur.get("relative_humidity_2m", 0))),
             "now_wind": int(round(cur.get("wind_speed_10m", 0))),
-            "city": WX_CITY, "days": days, "hourly_12h": hourly_12h}
+            "city": WX_CITY, "tz": WX_TZ, "lat": WX_LAT, "lon": WX_LON,
+            "days": days, "hourly_12h": hourly_12h}
 
 
 def _wx_compute():
@@ -548,6 +552,7 @@ if __name__ == "__main__":
     print(f"Claude 用量代理(双页) → http://{bind_host}:{PORT}/usage  (UA={CC_UA}, 限额{LIM_TTL}s 细节{DET_TTL}s)")
     print(f"  凭据: {CRED_FILE}")
     print(f"  日志: {PROJECTS_DIR}")
+    print(f"  天气: {WX_CITY} ({WX_LAT},{WX_LON}, {WX_TZ})")
     if DISC_PORT:
         print(f"  发现: UDP {DISC_PORT}")
         threading.Thread(target=_discovery_loop, daemon=True).start()
