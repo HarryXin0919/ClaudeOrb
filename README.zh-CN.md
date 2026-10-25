@@ -1,8 +1,10 @@
-# ClaudeOrb
+# TokenOrb
 
 [English](README.md) | **简体中文**
 
-一个摆在桌上的**小圆屏摆件,实时显示你的 Claude 套餐用量**——跑在 1.85" 圆形
+> 原名 **ClaudeOrb**。因为现在不只支持 Claude,还有本地 Codex 状态页,所以改名为 TokenOrb。
+
+一个摆在桌上的**小圆屏摆件,实时显示你的 AI 编程助手用量**。对 Claude,它显示套餐用量——跑在 1.85" 圆形
 ESP32-S3 屏上。一眼就能看到当前 **5 小时会话**和**每周**限额用了多少、什么时候重置、
 今日 token 数,以及你的 agent 此刻正在干什么。
 
@@ -37,7 +39,7 @@ ESP32-S3 屏上。一眼就能看到当前 **5 小时会话**和**每周**限额
 
 ```
 ~/.claude/.credentials.json ──> 代理(你的电脑) ──(局域网 JSON)──> ESP32-S3 圆屏
-   (Claude OAuth token)          api/oauth/usage                ClaudeOrb 固件
+   (Claude OAuth token)          api/oauth/usage                TokenOrb 固件
 ```
 
 token **永远不离开你的电脑**,也**绝不会被烧进设备**。代理同时会读本地 Claude Code 日志
@@ -110,7 +112,7 @@ BIND_HOST=0.0.0.0 PROXY_TOKEN=orb123 python proxy/claude_limits_proxy.py
 1. 装库(库管理器):**GFX Library for Arduino**(作者 *moononournation*)和 **ArduinoJson**。
 2. 打开 `firmware/claude_orb/claude_orb.ino`。
 3. 可以改顶部的 `NET_DEF_*` 出厂默认值(只支持 2.4GHz),也可以**直接烧**:
-   连不上 WiFi 时屏会自动开**配网热点**(`ClaudeOrb-Setup`),手机连上后自动弹出
+   连不上 WiFi 时屏会自动开**配网热点**(`TokenOrb-Setup`),手机连上后自动弹出
    配置页(或手动开 `http://192.168.4.1`),选好 WiFi 保存即可。代理地址自动发现,
    不用填 IP。之后想换网络,**长按 BOOT 3 秒**随时重新配网。
 4. 开发板设置:
@@ -202,4 +204,4 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=hug
 - ST77916 面板初始化序列改编自微雪 ESP32-S3-Touch-LCD-1.85 示例代码。
 - 显示驱动:[GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)。
 - "Claude" 名称与 logo 是 **Anthropic** 的商标;这里只把 logo 当作设备上的小图标用于标识。
-  ClaudeOrb 是非官方的爱好者项目,与 Anthropic 无隶属、未获其背书。详见 `NOTICE`。
+  TokenOrb 是非官方的爱好者项目,与 Anthropic 无隶属、未获其背书。详见 `NOTICE`。

@@ -27,7 +27,7 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "firmware", "claude_orb", "c
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Make claude_logo.h for ClaudeOrb")
+    ap = argparse.ArgumentParser(description="Make claude_logo.h for TokenOrb")
     ap.add_argument("--src", help="local PNG of the Claude mark (transparent bg); default: download")
     ap.add_argument("--size", type=int, default=44)
     ap.add_argument("--color", default="244,168,54", help="logo R,G,B (default orange-yellow #F4A836)")

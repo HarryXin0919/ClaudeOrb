@@ -1,8 +1,11 @@
-# ClaudeOrb
+# TokenOrb
 
 **English** | [简体中文](README.zh-CN.md)
 
-A tiny desk **orb that shows your Claude plan usage in real time** — on a 1.85" round
+> Formerly **ClaudeOrb**. Renamed because the orb now covers more than one AI coding assistant:
+> it shows Claude plan limits and a local Codex activity page.
+
+A tiny desk **orb that shows your AI coding assistants' usage in real time**. For Claude, it shows your plan usage — on a 1.85" round
 ESP32-S3 display. Glance over and see how much of your current **5‑hour session** and
 **weekly** limits you've burned, when they reset, today's token count, and what your
 agent is doing right now.
@@ -39,7 +42,7 @@ The ESP32 just polls that JSON over Wi‑Fi.
 
 ```
 ~/.claude/.credentials.json ──> proxy (your PC) ──(LAN JSON)──> ESP32-S3 round display
-   (Claude OAuth token)          api/oauth/usage              ClaudeOrb firmware
+   (Claude OAuth token)          api/oauth/usage              TokenOrb firmware
 ```
 
 The token **never leaves your PC** and is **never flashed into the device**.
@@ -120,7 +123,7 @@ Keep it running. See [Autostart](#autostart-optional) to launch it at login.
 2. Open `firmware/claude_orb/claude_orb.ino`.
 3. Optionally edit the `NET_DEF_*` defaults at the top (2.4 GHz WiFi only) — or just
    flash as-is: if the screen can't join WiFi it opens a **setup hotspot**
-   (`ClaudeOrb-Setup`); join it from your phone, the config page pops up (or open
+   (`TokenOrb-Setup`); join it from your phone, the config page pops up (or open
    `http://192.168.4.1`), pick your WiFi and save. The proxy is auto-discovered, so
    there's no IP to type. Re-enter setup anytime by **holding BOOT for 3 s**.
 4. Board settings:
@@ -225,5 +228,5 @@ generic init in the GFX library is for a different panel and will glitch.
 - ST77916 panel init adapted from Waveshare's ESP32‑S3‑Touch‑LCD‑1.85 demo.
 - Display driver: [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX).
 - The Claude name and logo are trademarks of **Anthropic**; the logo is rendered only as
-  a small on‑device icon for identification. ClaudeOrb is an unofficial, fan‑made project
+  a small on‑device icon for identification. TokenOrb is an unofficial, fan‑made project
   and is not affiliated with or endorsed by Anthropic. See `NOTICE`.

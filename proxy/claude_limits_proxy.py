@@ -410,7 +410,7 @@ def fetch_weather():
            "&daily=weather_code,temperature_2m_max,temperature_2m_min"
            "&timezone=%s&forecast_days=5"
            % (WX_LAT, WX_LON, urllib.parse.quote(WX_TZ)))
-    req = urllib.request.Request(url, headers={"User-Agent": "ClaudeOrb-RLCD/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "TokenOrb-RLCD/1.0"})
     try:
         with _opener.open(req, timeout=15) as r:
             j = json.loads(r.read().decode("utf-8"))
