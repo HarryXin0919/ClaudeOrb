@@ -1,4 +1,4 @@
-' ClaudeOrb proxy autostart for Windows (no admin needed).
+' TokenOrb proxy autostart for Windows (no admin needed).
 '
 ' 1) Edit the two paths below: your pythonw.exe, and this repo's proxy script.
 ' 2) Pick a token and put the SAME value in PROXY_TOKEN below AND on the orb
@@ -16,4 +16,4 @@ Set oEnv = oShell.Environment("PROCESS")   ' the launched python inherits these
 oEnv("BIND_HOST")   = "0.0.0.0"
 oEnv("PROXY_TOKEN") = "orb123"             ' <-- CHANGE THIS (must match the orb)
 
-oShell.Run """C:\Path\To\pythonw.exe"" ""C:\Path\To\ClaudeOrb\proxy\claude_limits_proxy.py""", 0, False
+oShell.Run """C:\Path\To\pythonw.exe"" ""C:\Path\To\TokenOrb\proxy\claude_limits_proxy.py""", 0, False

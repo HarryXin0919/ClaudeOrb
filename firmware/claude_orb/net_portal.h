@@ -1,5 +1,5 @@
 /* ============================================================================
-   net_portal.h —— WiFi 配网门户 + proxy UDP 自动发现 (ClaudeOrb / ClaudeSlate 共用)
+   net_portal.h —— WiFi 配网门户 + proxy UDP 自动发现 (TokenOrb / ClaudeSlate 共用)
 
    换网络不用重烧固件:
    · WiFi 凭据 / proxy 地址存 NVS(Preferences),编译期常量只做首次出厂默认
